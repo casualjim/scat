@@ -1,0 +1,14 @@
+[package]
+name = "scat"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+dark-light = "2"
+eyre = "0.6"
+syntastica = "0.6.1"
+syntastica-parsers = { version = "0.6.1", features = ["most"] }
+syntastica-themes = "0.6.1"
+tft = "0.1.1"

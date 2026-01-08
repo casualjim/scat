@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+#MISE description="Run the indexer with flamegraph"
+
+echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+sudo sysctl -w kernel.perf_event_mlock_kb=262144
+ulimit -l unlimited
+
+export RUST_LOG=debug
+samply record target/release/context index

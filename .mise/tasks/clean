@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+#MISE description="Clean all the generated files in the project"
+
+echo "🚀 Cleaning generated artifacts..."
+proj_dir=$(git rev-parse --show-toplevel)
+cd "$proj_dir" || exit 1
+
+cargo clean

@@ -1,0 +1,77 @@
+amends "package://github.com/jdx/hk/releases/download/v1.19.0/hk@1.19.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.19.0/hk@1.19.0#/Builtins.pkl"
+
+local rust_steps = new Mapping<String, Step> {
+  ["cargo-check"] = (Builtins.cargo_check) {
+    check = "cargo check --workspace --all-targets"
+    fix = "cargo check --workspace --all-targets"
+    depends = "rustfmt"
+    check_first = true
+  }
+
+  ["cargo-clippy"] = new Step {
+    glob = List("**/*.rs")
+    stage = List("**/*.rs")
+    check = "cargo clippy --workspace --all-targets -- -D warnings"
+    fix = "cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged -- -D warnings"
+    check_first = true
+    depends = "cargo-check"
+  }
+
+  ["rustfmt"] = new Step {
+    glob = List("**/*.rs")
+    stage = List("**/*.rs")
+    check = "rustfmt --edition 2024 --check {{files}}"
+    fix = "rustfmt --edition 2024 {{files}}"
+    depends = "cargo-sort"
+  }
+
+  ["cargo-sort"] = new Step {
+    glob = List("**/Cargo.toml")
+    stage = List("**/Cargo.toml")
+    check = "cargo sort --workspace --grouped --check ."
+    fix = "cargo sort --workspace --grouped ."
+    check_first = true
+  }
+
+}
+
+local project_steps = new Mapping<String, Step> {
+  ...rust_steps
+
+  ["shellcheck"] = Builtins.shellcheck
+
+  ["actionlint"] = (Builtins.actionlint) {
+    dir = "."
+  }
+
+  ["hadolint"] = Builtins.hadolint
+
+  ["trailing-whitespace"] = Builtins.trailing_whitespace
+
+  ["check-toml"] = (Builtins.taplo) {
+    glob = List("**/*.toml")
+    stage = List("**/*.toml")
+  }
+
+  ["check-merge-conflict"] = Builtins.check_merge_conflict
+
+  ["check-added-large-files"] = Builtins.check_added_large_files
+}
+
+hooks {
+  ["pre-commit"] {
+    fix = true
+    stash = "git"
+    steps = project_steps
+  }
+
+  ["check"] {
+    steps = project_steps
+  }
+
+  ["fix"] {
+    fix = true
+    steps = project_steps
+  }
+}

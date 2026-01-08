@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+#MISE description="Build the application (Debug)"
+#MISE sources=["Cargo.toml", "src/**/*.rs"]
+#MISE outputs=["target/debug/context"]
+
+echo "🚀 Starting debug build..."
+proj_dir=$(git rev-parse --show-toplevel)
+cd "$proj_dir" || exit 1
+
+cargo build

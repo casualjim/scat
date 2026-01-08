@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+#MISE description="Run the tests for this project"
+#MISE sources=["Cargo.toml", "src/**/*.rs"]
+#MISE depends=["build:debug"]
+
+cargo nextest run --all-features
