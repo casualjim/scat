@@ -14,17 +14,102 @@ use syntastica_parsers::{Lang, LanguageSetImpl};
 use tft::try_detect;
 
 #[derive(Parser, Debug)]
-#[command(name = "scat", version, about = "cat with syntax highlighting")]
+#[command(
+  name = "scat",
+  version,
+  about = "cat with syntax highlighting",
+  long_about = "A modern replacement for cat with syntax highlighting powered by tree-sitter.\n\
+                Automatically detects file types and applies appropriate syntax highlighting.\n\
+                Supports 100+ programming languages and multiple color themes.",
+  after_help = "EXAMPLES:\n    \
+    scat main.rs                    Display a file with syntax highlighting\n    \
+    scat -n config.toml             Show file with line numbers\n    \
+    scat --language rust file.txt   Force Rust syntax highlighting\n    \
+    scat --theme dracula main.js    Use Dracula color theme\n    \
+    cat file.rs | scat              Read from stdin\n    \
+    scat *.py                       Display multiple files\n\n\
+    For available themes, see: https://docs.rs/syntastica-themes/latest/syntastica_themes/\n\n\
+    To generate shell completions:\n    \
+    scat --completions bash > ~/.local/share/bash-completion/completions/scat"
+)]
 struct Cli {
-  #[arg(long, value_enum)]
+  #[arg(
+    long,
+    value_enum,
+    help = "Generate shell completions for the specified shell",
+    long_help = "Generate shell completion script for the specified shell.\n\
+                 Output the completion script to stdout, which you can then save to the\n\
+                 appropriate location for your shell.\n\n\
+                 Examples:\n  \
+                 scat --completions bash > ~/.local/share/bash-completion/completions/scat\n  \
+                 scat --completions zsh > ~/.zsh/completion/_scat\n  \
+                 scat --completions fish > ~/.config/fish/completions/scat.fish"
+  )]
   completions: Option<clap_complete::Shell>,
-  #[arg(long, value_name = "LANG")]
+
+  #[arg(
+    long,
+    value_name = "LANG",
+    help = "Force a specific programming language",
+    long_help = "Override automatic language detection and force a specific language.\n\
+                 Useful when the file extension doesn't match the content or for files\n\
+                 without extensions.\n\n\
+                 Examples:\n  \
+                 scat --language rust config.txt\n  \
+                 scat --language json response.log\n\n\
+                 For a complete list of supported languages, see:\n\
+                 https://docs.rs/syntastica-parsers/latest/syntastica_parsers/"
+  )]
   language: Option<String>,
-  #[arg(long, value_name = "THEME", default_value = "auto")]
+
+  #[arg(
+    long,
+    value_name = "THEME",
+    default_value = "auto",
+    help = "Color theme to use for syntax highlighting",
+    long_help = "Specify a color theme for syntax highlighting.\n\n\
+                 Use 'auto' (default) to automatically detect light/dark mode:\n  \
+                 - Light mode: catppuccin-latte\n  \
+                 - Dark mode: catppuccin-mocha\n\n\
+                 Popular themes include:\n  \
+                 dracula, nord, one-dark, one-light, gruvbox-dark, gruvbox-light,\n  \
+                 solarized-dark, solarized-light, tokyo-night, catppuccin-mocha,\n  \
+                 catppuccin-latte, catppuccin-frappe, catppuccin-macchiato\n\n\
+                 For a complete list of available themes, see:\n\
+                 https://docs.rs/syntastica-themes/latest/syntastica_themes/"
+  )]
   theme: String,
-  #[arg(long, short = 'n')]
+
+  #[arg(
+    long,
+    short = 'n',
+    help = "Show line numbers",
+    long_help = "Display line numbers at the beginning of each line.\n\
+                 Line numbers are right-aligned and separated from the content by two spaces."
+  )]
   line_numbers: bool,
-  #[arg(value_name = "FILE")]
+
+  #[arg(
+    long,
+    help = "Generate man page",
+    long_help = "Generate a manual page in roff format and print to stdout.\n\
+                 You can save this to a file and install it in your man path.\n\n\
+                 Example:\n  \
+                 scat --man-page > scat.1\n  \
+                 sudo cp scat.1 /usr/local/share/man/man1/"
+  )]
+  man_page: bool,
+
+  #[arg(
+    value_name = "FILE",
+    help = "Files to display (use '-' or omit for stdin)",
+    long_help = "One or more files to display with syntax highlighting.\n\
+                 If no files are specified, or if '-' is given, reads from stdin.\n\n\
+                 Examples:\n  \
+                 scat main.rs lib.rs\n  \
+                 cat file.rs | scat\n  \
+                 echo 'code' | scat --language rust"
+  )]
   files: Vec<PathBuf>,
 }
 
@@ -32,6 +117,10 @@ fn main() -> Result<()> {
   let cli = Cli::parse();
   if let Some(shell) = cli.completions {
     write_completions(shell)?;
+    return Ok(());
+  }
+  if cli.man_page {
+    write_man_page()?;
     return Ok(());
   }
   let use_color = io::stdout().is_terminal();
@@ -118,6 +207,13 @@ fn main() -> Result<()> {
 fn write_completions(shell: clap_complete::Shell) -> Result<()> {
   let mut cmd = Cli::command();
   clap_complete::generate(shell, &mut cmd, "scat", &mut io::stdout());
+  Ok(())
+}
+
+fn write_man_page() -> Result<()> {
+  let cmd = Cli::command();
+  let man = clap_mangen::Man::new(cmd);
+  man.render(&mut io::stdout())?;
   Ok(())
 }
 
