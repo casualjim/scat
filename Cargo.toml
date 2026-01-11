@@ -1,6 +1,6 @@
 [package]
 name = "scat"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Ivan Porto Carrero"]
 description = "cat with syntax highlighting - a modern replacement for cat with tree-sitter powered syntax highlighting"
@@ -16,7 +16,9 @@ clap_complete = "4"
 clap_mangen = "0.2"
 dark-light = "2"
 eyre = "0.6"
+palate = "0.2"
 syntastica = "0.6.1"
-syntastica-parsers = { version = "0.6.1", features = ["most"] }
+syntastica-parsers = { version = "0.6.1", features = ["all"] }
 syntastica-themes = "0.6.1"
-tft = "0.1.1"
+zbus = "=5.12.0"
+zvariant = "=5.8.0"

@@ -1,17 +1,26 @@
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, Cursor, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
-use clap::{CommandFactory, Parser};
+use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use dark_light::Mode as DarkLightMode;
 use eyre::{Result, eyre};
+use palate::detectors;
 use syntastica::Processor;
 use syntastica::language_set::SupportedLanguage;
 use syntastica::renderer::{Renderer, TerminalRenderer};
 use syntastica::theme::ResolvedTheme;
-use syntastica_parsers::{Lang, LanguageSetImpl};
-use tft::try_detect;
+use syntastica_parsers::{LANGUAGE_NAMES, Lang, LanguageSetImpl};
+
+const MAX_CONTENT_SIZE_BYTES: usize = 51200;
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorWhen {
+  Auto,
+  Never,
+  Always,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -34,7 +43,8 @@ use tft::try_detect;
 )]
 struct Cli {
   #[arg(
-    long,
+    long = "completions",
+    alias = "completion",
     value_enum,
     help = "Generate shell completions for the specified shell",
     long_help = "Generate shell completion script for the specified shell.\n\
@@ -49,6 +59,16 @@ struct Cli {
 
   #[arg(
     long,
+    short = 'p',
+    action = ArgAction::Count,
+    help = "Only show plain style, no decorations",
+    long_help = "Only show plain style, no decorations. When used twice ('-pp'), it also disables paging."
+  )]
+  plain: u8,
+
+  #[arg(
+    long,
+    short = 'l',
     value_name = "LANG",
     help = "Force a specific programming language",
     long_help = "Override automatic language detection and force a specific language.\n\
@@ -82,12 +102,68 @@ struct Cli {
 
   #[arg(
     long,
+    value_name = "THEME",
+    help = "Theme for light backgrounds (used with --theme=auto/light)"
+  )]
+  theme_light: Option<String>,
+
+  #[arg(
+    long,
+    value_name = "THEME",
+    help = "Theme for dark backgrounds (used with --theme=auto/dark)"
+  )]
+  theme_dark: Option<String>,
+
+  #[arg(
+    long,
     short = 'n',
     help = "Show line numbers",
     long_help = "Display line numbers at the beginning of each line.\n\
                  Line numbers are right-aligned and separated from the content by two spaces."
   )]
   line_numbers: bool,
+
+  #[arg(
+    long,
+    value_enum,
+    default_value = "auto",
+    help = "Specify when to use colored output"
+  )]
+  color: ColorWhen,
+
+  #[arg(
+    long,
+    value_name = "name",
+    help = "Specify the name to display for a file"
+  )]
+  file_name: Option<PathBuf>,
+
+  #[arg(long, help = "List supported themes")]
+  list_themes: bool,
+
+  #[arg(
+    long,
+    short = 's',
+    help = "Squeeze consecutive empty lines into a single empty line"
+  )]
+  squeeze_blank: bool,
+
+  #[arg(
+    long,
+    value_name = "squeeze-limit",
+    help = "Set the maximum number of consecutive empty lines"
+  )]
+  squeeze_limit: Option<usize>,
+
+  #[arg(
+    long,
+    value_name = "components",
+    help = "Configure which style components to display"
+  )]
+  style: Option<String>,
+
+  #[arg(long, short = 'u', help = "No-op, output is always unbuffered")]
+  unbuffered: bool,
 
   #[arg(
     long,
@@ -123,14 +199,30 @@ fn main() -> Result<()> {
     write_man_page()?;
     return Ok(());
   }
-  let use_color = io::stdout().is_terminal();
+  if cli.list_themes {
+    for theme in syntastica_themes::THEMES {
+      println!("{theme}");
+    }
+    return Ok(());
+  }
+  let mut use_color = io::stdout().is_terminal();
+  match cli.color {
+    ColorWhen::Auto => {}
+    ColorWhen::Never => use_color = false,
+    ColorWhen::Always => use_color = true,
+  }
   let language_set = LanguageSetImpl::new();
-  let theme = resolve_theme(&cli.theme);
-  let line_numbers = cli.line_numbers;
+  let theme = resolve_theme_with_overrides(
+    &cli.theme,
+    cli.theme_light.as_deref(),
+    cli.theme_dark.as_deref(),
+  );
+  let line_numbers = resolve_line_numbers(&cli);
+  let squeeze_limit = cli.squeeze_limit.unwrap_or(1);
+  let squeeze_blank = cli.squeeze_blank || cli.squeeze_limit.is_some();
   let language_override = match cli.language.as_deref() {
     Some(name) => Some(
-      resolve_language_override(name, &language_set)
-        .ok_or_else(|| eyre!("Unsupported language: {name}"))?,
+      resolve_language(name, &language_set).ok_or_else(|| eyre!("Unsupported language: {name}"))?,
     ),
     None => None,
   };
@@ -160,17 +252,19 @@ fn main() -> Result<()> {
         had_error = true;
         continue;
       }
-        emit_bytes(
-          &mut stdout,
-          buf,
-          None,
-          language_override.as_ref(),
-          line_numbers,
-          use_color,
-          &language_set,
-          &mut processor,
-          &mut renderer,
-          &theme,
+      emit_bytes(
+        &mut stdout,
+        buf,
+        cli.file_name.as_deref(),
+        language_override.as_ref(),
+        line_numbers,
+        use_color,
+        squeeze_blank,
+        squeeze_limit,
+        &language_set,
+        &mut processor,
+        &mut renderer,
+        &theme,
       )?;
       continue;
     }
@@ -184,6 +278,8 @@ fn main() -> Result<()> {
           language_override.as_ref(),
           line_numbers,
           use_color,
+          squeeze_blank,
+          squeeze_limit,
           &language_set,
           &mut processor,
           &mut renderer,
@@ -224,11 +320,18 @@ fn emit_bytes(
   language_override: Option<&Lang>,
   line_numbers: bool,
   use_color: bool,
+  squeeze_blank: bool,
+  squeeze_limit: usize,
   language_set: &LanguageSetImpl,
   processor: &mut Processor<LanguageSetImpl>,
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
 ) -> Result<()> {
+  let bytes = if squeeze_blank {
+    squeeze_blank_lines_bytes(&bytes, squeeze_limit)
+  } else {
+    bytes
+  };
   if !use_color && !line_numbers {
     stdout.write_all(&bytes)?;
     return Ok(());
@@ -265,15 +368,107 @@ fn detect_language(
   content: &str,
   language_set: &LanguageSetImpl,
 ) -> Option<Lang> {
-  let detect_path = path.unwrap_or_else(|| Path::new("stdin"));
-  let file_type = try_detect(detect_path, content)?;
-  <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_file_type(file_type, language_set)
+  let name = detect_language_name(path, content)?;
+  resolve_language(name.to_ascii_lowercase(), language_set)
 }
 
-fn resolve_language_override(name: &str, language_set: &LanguageSetImpl) -> Option<Lang> {
+fn resolve_language(name: impl AsRef<str>, language_set: &LanguageSetImpl) -> Option<Lang> {
+  let name = name.as_ref();
   <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_name(name, language_set)
     .ok()
     .or_else(|| <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_injection(name, language_set))
+    .or_else(|| {
+      let canonical = LANGUAGE_NAMES
+        .iter()
+        .copied()
+        .find(|candidate| candidate.eq_ignore_ascii_case(name))?;
+      <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_name(canonical, language_set).ok()
+    })
+}
+
+fn detect_language_name(path: Option<&Path>, content: &str) -> Option<&'static str> {
+  let mut extension: Option<String> = None;
+  let mut candidates = Vec::new();
+
+  if let Some(path) = path {
+    if let Some(filename) = path.file_name().and_then(|name| name.to_str()) {
+      if let Some(candidate) = detectors::get_language_from_filename(filename) {
+        return Some(candidate);
+      }
+
+      extension = detectors::get_extension(filename).map(str::to_string);
+      candidates = extension
+        .as_deref()
+        .map(detectors::get_languages_from_extension)
+        .unwrap_or_else(Vec::new);
+      if candidates.len() == 1 {
+        return Some(candidates[0]);
+      }
+    }
+  }
+
+  let shebang_candidates =
+    detectors::get_languages_from_shebang(Cursor::new(content)).unwrap_or_default();
+  candidates = filter_candidates(candidates, shebang_candidates);
+  if candidates.len() == 1 {
+    return Some(candidates[0]);
+  }
+
+  let content = truncate_to_char_boundary(content, MAX_CONTENT_SIZE_BYTES);
+  candidates = if candidates.len() > 1 {
+    if let Some(extension) = extension.as_deref() {
+      let heuristic_candidates =
+        detectors::get_languages_from_heuristics(extension, &candidates, content);
+      filter_candidates(candidates, heuristic_candidates)
+    } else {
+      candidates
+    }
+  } else {
+    candidates
+  };
+
+  match candidates.len() {
+    0 => None,
+    1 => Some(candidates[0]),
+    _ => Some(detectors::classify(content, &candidates)),
+  }
+}
+
+fn filter_candidates(
+  previous_candidates: Vec<&'static str>,
+  new_candidates: Vec<&'static str>,
+) -> Vec<&'static str> {
+  if previous_candidates.is_empty() {
+    return new_candidates;
+  }
+
+  if new_candidates.is_empty() {
+    return previous_candidates;
+  }
+
+  let filtered_candidates: Vec<&'static str> = previous_candidates
+    .iter()
+    .filter(|candidate| new_candidates.contains(candidate))
+    .copied()
+    .collect();
+
+  if filtered_candidates.is_empty() {
+    previous_candidates
+  } else {
+    filtered_candidates
+  }
+}
+
+fn truncate_to_char_boundary(s: &str, mut max: usize) -> &str {
+  if max >= s.len() {
+    return s;
+  }
+
+  while !s.is_char_boundary(max) {
+    max -= 1;
+  }
+
+  &s[..max]
 }
 
 fn render_text(
@@ -310,19 +505,46 @@ fn render_text(
   }
 }
 
-fn resolve_theme(theme: &str) -> ResolvedTheme {
+fn resolve_theme_with_overrides(
+  theme: &str,
+  theme_light: Option<&str>,
+  theme_dark: Option<&str>,
+) -> ResolvedTheme {
   let override_name = theme.trim();
-  if !override_name.is_empty() && override_name != "auto" {
-    if let Some(theme) = syntastica_themes::from_str(override_name) {
+  let theme_key = override_name.split(':').next().unwrap_or("auto");
+
+  match theme_key {
+    "" | "auto" => resolve_auto_theme(theme_light, theme_dark),
+    "dark" => resolve_named_theme(theme_dark, true),
+    "light" => resolve_named_theme(theme_light, false),
+    _ => {
+      if let Some(theme) = syntastica_themes::from_str(theme_key) {
+        return theme;
+      }
+      resolve_auto_theme(theme_light, theme_dark)
+    }
+  }
+}
+
+fn resolve_named_theme(override_name: Option<&str>, prefer_dark: bool) -> ResolvedTheme {
+  if let Some(name) = override_name {
+    if let Some(theme) = syntastica_themes::from_str(name.trim()) {
       return theme;
     }
   }
+  if prefer_dark {
+    syntastica_themes::catppuccin::mocha()
+  } else {
+    syntastica_themes::catppuccin::latte()
+  }
+}
 
+fn resolve_auto_theme(theme_light: Option<&str>, theme_dark: Option<&str>) -> ResolvedTheme {
   match dark_light::detect() {
-    Ok(DarkLightMode::Light) => syntastica_themes::catppuccin::latte(),
-    Ok(DarkLightMode::Dark) => syntastica_themes::catppuccin::mocha(),
-    Ok(DarkLightMode::Unspecified) => syntastica_themes::catppuccin::mocha(),
-    Err(_) => syntastica_themes::catppuccin::mocha(),
+    Ok(DarkLightMode::Light) => resolve_named_theme(theme_light, false),
+    Ok(DarkLightMode::Dark) => resolve_named_theme(theme_dark, true),
+    Ok(DarkLightMode::Unspecified) => resolve_named_theme(theme_dark, true),
+    Err(_) => resolve_named_theme(theme_dark, true),
   }
 }
 
@@ -417,4 +639,77 @@ fn count_lines_bytes(bytes: &[u8]) -> usize {
 fn line_number_width(line_count: usize) -> usize {
   let width = line_count.to_string().len();
   if width == 0 { 1 } else { width }
+}
+
+fn resolve_line_numbers(cli: &Cli) -> bool {
+  let mut line_numbers = cli.line_numbers;
+  if let Some(style) = cli.style.as_deref() {
+    line_numbers = apply_style_line_numbers(line_numbers, style);
+  }
+  if cli.plain > 0 {
+    line_numbers = false;
+  }
+  if cli.line_numbers {
+    line_numbers = true;
+  }
+  line_numbers
+}
+
+fn apply_style_line_numbers(current: bool, style: &str) -> bool {
+  let mut line_numbers = current;
+  for raw in style.split(',') {
+    let token = raw.trim();
+    match token {
+      "plain" | "-numbers" => line_numbers = false,
+      "numbers" | "+numbers" => line_numbers = true,
+      _ => {}
+    }
+  }
+  line_numbers
+}
+
+fn squeeze_blank_lines_bytes(bytes: &[u8], limit: usize) -> Vec<u8> {
+  if bytes.is_empty() {
+    return Vec::new();
+  }
+  let mut out = Vec::with_capacity(bytes.len());
+  let mut blank_count = 0usize;
+  let mut start = 0usize;
+  for (index, byte) in bytes.iter().enumerate() {
+    if *byte == b'\n' {
+      let line = &bytes[start..=index];
+      let mut content_end = index;
+      if content_end > start && bytes[content_end - 1] == b'\r' {
+        content_end -= 1;
+      }
+      let is_blank = content_end == start;
+      if is_blank {
+        blank_count += 1;
+        if blank_count <= limit {
+          out.extend_from_slice(line);
+        }
+      } else {
+        blank_count = 0;
+        out.extend_from_slice(line);
+      }
+      start = index + 1;
+    }
+  }
+  if start < bytes.len() {
+    let line = &bytes[start..];
+    let mut content_end = bytes.len();
+    if content_end > start && bytes[content_end - 1] == b'\r' {
+      content_end -= 1;
+    }
+    let is_blank = content_end == start;
+    if is_blank {
+      blank_count += 1;
+      if blank_count <= limit {
+        out.extend_from_slice(line);
+      }
+    } else {
+      out.extend_from_slice(line);
+    }
+  }
+  out
 }
