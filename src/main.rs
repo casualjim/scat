@@ -11,7 +11,7 @@ use syntastica::Processor;
 use syntastica::language_set::SupportedLanguage;
 use syntastica::renderer::{Renderer, TerminalRenderer};
 use syntastica::theme::ResolvedTheme;
-use syntastica_parsers::{LANGUAGE_NAMES, Lang, LanguageSetImpl};
+use syntastica_parsers_git::{LANGUAGE_NAMES, Lang, LanguageSetImpl};
 
 const MAX_CONTENT_SIZE_BYTES: usize = 51200;
 
@@ -78,7 +78,7 @@ struct Cli {
                  scat --language rust config.txt\n  \
                  scat --language json response.log\n\n\
                  For a complete list of supported languages, see:\n\
-                 https://docs.rs/syntastica-parsers/latest/syntastica_parsers/"
+                 https://docs.rs/syntastica-parsers-git/latest/syntastica_parsers_git/"
   )]
   language: Option<String>,
 
