@@ -20,5 +20,7 @@ palate = "0.2"
 syntastica = "0.6.1"
 syntastica-parsers-git = { version = "0.6.1", features = ["all"] }
 syntastica-themes = "0.6.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
 zbus = "=5.12.0"
 zvariant = "=5.8.0"
