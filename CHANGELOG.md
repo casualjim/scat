@@ -1,6 +1,5 @@
-# Changelog
+## [0.1.2] - 2026-01-15
 
-All notable changes to this project will be documented in this file.
+### ⚙️ Miscellaneous Tasks
 
-The format is based on Keep a Changelog, and this project adheres to
-Semantic Versioning.
+- Configure cargo-dist homebrew tap
