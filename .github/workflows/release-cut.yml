@@ -74,10 +74,10 @@ jobs:
       - name: Run cargo-release
         run: cargo release ${{ steps.version.outputs.next_version }} --no-confirm --no-publish --no-push --execute
 
-      - name: Push release commit with GITHUB_TOKEN
+      - name: Push release commit with RELEASE_TOKEN
         run: |
           git config --unset-all http.https://github.com/.extraheader || true
-          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git remote set-url origin "https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/${{ github.repository }}.git"
           git push origin HEAD
 
       - name: Push release tag with RELEASE_TOKEN
