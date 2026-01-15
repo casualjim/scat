@@ -1,6 +1,6 @@
 [package]
 name = "scat"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2024"
 authors = ["Ivan Porto Carrero"]
 description = "cat with syntax highlighting - a modern replacement for cat with tree-sitter powered syntax highlighting"
