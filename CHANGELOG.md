@@ -3,3 +3,5 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Configure cargo-dist homebrew tap
+- Update changelog for v0.1.2 [ci skip]
+- Release scat version 0.1.2
