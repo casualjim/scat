@@ -21,8 +21,8 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Install an updater program (enables self-update for shell/powershell installers)
 install-updater = true
+github-attestations = true
 
 [dist.github-custom-runners]
 # Prefer native runners (no cross builds)
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
-github-attestations = true
