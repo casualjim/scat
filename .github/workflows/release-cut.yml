@@ -77,7 +77,7 @@ jobs:
       - name: Push release commit with RELEASE_TOKEN
         run: |
           git config --unset-all http.https://github.com/.extraheader || true
-          git remote set-url origin "https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/${{ github.repository }}.git"
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
           git push origin HEAD
 
       - name: Push release tag with RELEASE_TOKEN
