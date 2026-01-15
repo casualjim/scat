@@ -1,3 +1,9 @@
+## [0.1.4] - 2026-01-15
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.4 [ci skip]
+- Release scat version 0.1.4
 ## [0.1.3] - 2026-01-15
 
 ### ⚙️ Miscellaneous Tasks
