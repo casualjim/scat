@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "scat"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap 4.5.54",
  "clap_complete",
