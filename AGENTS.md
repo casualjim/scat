@@ -14,6 +14,17 @@ Always default to the `mise` tasks below; only run direct toolchain commands if 
 - `mise build:debug`: Build Rust 
 - `mise test`: All tests (Rust nextest + Workers via bun test).
 
+## Release Process (PR-Driven Bumps)
+Releases are automated after CI passes on `main`. The bump level is controlled by tokens in the PR title/body (commit message fallback).
+
+- `bump:major`
+- `bump:minor`
+- `bump:patch`
+
+If no token is present, the release defaults to `bump:patch`. If multiple tokens are present, the highest wins (major > minor > patch).
+
+When using `gh` to create a PR, the agent must include the bump token in the PR body.
+
 ## Code Navigation (Use Rust LSP!)
 
 **IMPORTANT: Always use the Rust LSP for code navigation!** The Rust LSP should be your primary tool for:
