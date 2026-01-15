@@ -33,6 +33,7 @@ enum ColorWhen {
   after_help = "EXAMPLES:\n    \
     scat main.rs                    Display a file with syntax highlighting\n    \
     scat -n config.toml             Show file with line numbers\n    \
+    scat main.rs#L10-L20            Show only selected lines\n    \
     scat --language rust file.txt   Force Rust syntax highlighting\n    \
     scat --theme dracula main.js    Use Dracula color theme\n    \
     cat file.rs | scat              Read from stdin\n    \
@@ -62,7 +63,7 @@ struct Cli {
     short = 'p',
     action = ArgAction::Count,
     help = "Only show plain style, no decorations",
-    long_help = "Only show plain style, no decorations. When used twice ('-pp'), it also disables paging."
+    long_help = "Only show plain style, no decorations."
   )]
   plain: u8,
 
@@ -125,16 +126,33 @@ struct Cli {
 
   #[arg(
     long,
+    value_name = "RANGE",
+    help = "Show only selected lines (e.g. 10-20, 10:20, 10,20, 10)",
+    long_help = "Show only selected lines from the file.\n\
+                 Accepted formats: start-end, start:end, start,end, or a single line number.\n\
+                 Examples:\n  \
+                 scat --lines 10-20 main.rs\n  \
+                 scat --lines 10:20 main.rs\n  \
+                 scat --lines 10,20 main.rs\n  \
+                 scat --lines 10 main.rs"
+  )]
+  lines: Option<String>,
+
+  #[arg(
+    long,
     value_enum,
     default_value = "auto",
     help = "Specify when to use colored output"
   )]
   color: ColorWhen,
 
+  #[arg(long, help = "Show file headers between files")]
+  file_headers: bool,
+
   #[arg(
     long,
     value_name = "name",
-    help = "Specify the name to display for a file"
+    help = "Specify the name to display for stdin (used with --file-headers)"
   )]
   file_name: Option<PathBuf>,
 
@@ -183,10 +201,23 @@ struct Cli {
                  If no files are specified, or if '-' is given, reads from stdin.\n\n\
                  Examples:\n  \
                  scat main.rs lib.rs\n  \
+                 scat main.rs#L10-L20\n  \
                  cat file.rs | scat\n  \
                  echo 'code' | scat --language rust"
   )]
   files: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LineRange {
+  start: usize,
+  end: usize,
+}
+
+#[derive(Clone, Debug)]
+struct FileSpec {
+  path: PathBuf,
+  line_range: Option<LineRange>,
 }
 
 fn main() -> Result<()> {
@@ -233,15 +264,43 @@ fn main() -> Result<()> {
     cli.files
   };
 
+  let global_line_range = match cli.lines.as_deref() {
+    Some(raw) => Some(parse_line_range_arg(raw)?),
+    None => None,
+  };
+
+  let mut had_error = false;
+  let mut file_specs = Vec::with_capacity(files.len());
+  for path in files {
+    match parse_file_spec(path, global_line_range) {
+      Ok(spec) => file_specs.push(spec),
+      Err(err) => {
+        eprintln!("scat: {err}");
+        had_error = true;
+      }
+    }
+  }
+
+  let show_headers = cli.file_headers && file_specs.len() > 1;
   let mut processor = Processor::new(&language_set);
   let mut renderer = TerminalRenderer::new(None);
   let mut stdout = io::stdout().lock();
   let mut stdin = io::stdin();
-  let mut had_error = false;
   let mut stdin_consumed = false;
+  let mut last_ended_with_newline = true;
+  let mut wrote_output = false;
 
-  for path in files {
-    if path == Path::new("-") {
+  for spec in file_specs {
+    if show_headers {
+      if wrote_output && !last_ended_with_newline {
+        writeln!(stdout)?;
+      }
+      let display_name = display_name_for_spec(&spec, cli.file_name.as_deref());
+      writeln!(stdout, "==> {display_name} <==")?;
+      wrote_output = true;
+      last_ended_with_newline = true;
+    }
+    if spec.path == Path::new("-") {
       if stdin_consumed {
         continue;
       }
@@ -252,10 +311,11 @@ fn main() -> Result<()> {
         had_error = true;
         continue;
       }
-      emit_bytes(
+      last_ended_with_newline = emit_bytes(
         &mut stdout,
         buf,
         cli.file_name.as_deref(),
+        spec.line_range,
         language_override.as_ref(),
         line_numbers,
         use_color,
@@ -266,15 +326,17 @@ fn main() -> Result<()> {
         &mut renderer,
         &theme,
       )?;
+      wrote_output = true;
       continue;
     }
 
-    match fs::read(&path) {
+    match fs::read(&spec.path) {
       Ok(buf) => {
-        emit_bytes(
+        last_ended_with_newline = emit_bytes(
           &mut stdout,
           buf,
-          Some(&path),
+          Some(&spec.path),
+          spec.line_range,
           language_override.as_ref(),
           line_numbers,
           use_color,
@@ -285,9 +347,10 @@ fn main() -> Result<()> {
           &mut renderer,
           &theme,
         )?;
+        wrote_output = true;
       }
       Err(err) => {
-        eprintln!("scat: {}: {err}", path.display());
+        eprintln!("scat: {}: {err}", spec.path.display());
         had_error = true;
       }
     }
@@ -317,6 +380,7 @@ fn emit_bytes(
   stdout: &mut impl Write,
   bytes: Vec<u8>,
   path: Option<&Path>,
+  line_range: Option<LineRange>,
   language_override: Option<&Lang>,
   line_numbers: bool,
   use_color: bool,
@@ -326,15 +390,22 @@ fn emit_bytes(
   processor: &mut Processor<LanguageSetImpl>,
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
-) -> Result<()> {
+) -> Result<bool> {
+  let bytes = if let Some(range) = line_range {
+    slice_bytes_by_line_range(&bytes, range)
+  } else {
+    bytes
+  };
   let bytes = if squeeze_blank {
     squeeze_blank_lines_bytes(&bytes, squeeze_limit)
   } else {
     bytes
   };
+  let line_number_start = line_range.map(|range| range.start).unwrap_or(1);
+  let ended_with_newline = bytes.last() == Some(&b'\n') || bytes.is_empty();
   if !use_color && !line_numbers {
     stdout.write_all(&bytes)?;
-    return Ok(());
+    return Ok(ended_with_newline);
   }
 
   if use_color {
@@ -343,24 +414,25 @@ fn emit_bytes(
         let language = language_override
           .cloned()
           .or_else(|| detect_language(path, &text, language_set));
-        let rendered = render_text(&text, language, line_numbers, processor, renderer, theme);
+        let rendered =
+          render_text(&text, language, line_numbers, line_number_start, processor, renderer, theme);
         stdout.write_all(rendered.as_bytes())?;
-        return Ok(());
+        return Ok(ended_with_newline);
       }
       Err(err) => {
         let bytes = err.into_bytes();
         if line_numbers {
-          write_numbered_bytes(stdout, &bytes)?;
+          write_numbered_bytes(stdout, &bytes, line_number_start)?;
         } else {
           stdout.write_all(&bytes)?;
         }
-        return Ok(());
+        return Ok(ended_with_newline);
       }
     }
   }
 
-  write_numbered_bytes(stdout, &bytes)?;
-  Ok(())
+  write_numbered_bytes(stdout, &bytes, line_number_start)?;
+  Ok(ended_with_newline)
 }
 
 fn detect_language(
@@ -475,13 +547,14 @@ fn render_text(
   text: &str,
   language: Option<Lang>,
   line_numbers: bool,
+  line_number_start: usize,
   processor: &mut Processor<LanguageSetImpl>,
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
 ) -> String {
   let Some(language) = language else {
     return if line_numbers {
-      number_plain_text(text)
+      number_plain_text(text, line_number_start)
     } else {
       text.to_string()
     };
@@ -490,14 +563,14 @@ fn render_text(
   match processor.process(text, language) {
     Ok(highlights) => {
       if line_numbers {
-        render_highlights_with_numbers(&highlights, renderer, theme)
+        render_highlights_with_numbers(&highlights, renderer, theme, line_number_start)
       } else {
         syntastica::render(&highlights, renderer, theme.clone())
       }
     }
     Err(_) => {
       if line_numbers {
-        number_plain_text(text)
+        number_plain_text(text, line_number_start)
       } else {
         text.to_string()
       }
@@ -552,17 +625,19 @@ fn render_highlights_with_numbers(
   highlights: &syntastica::Highlights<'_>,
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
+  line_number_start: usize,
 ) -> String {
   if highlights.is_empty() {
     return String::new();
   }
 
-  let width = line_number_width(highlights.len());
+  let last_line_no = line_number_start.saturating_add(highlights.len().saturating_sub(1));
+  let width = line_number_width(last_line_no);
   let last_line = highlights.len().saturating_sub(1);
   let mut out = renderer.head().into_owned();
 
   for (index, line) in highlights.iter().enumerate() {
-    let line_no = index + 1;
+    let line_no = line_number_start + index;
     let prefix = format!("{:>width$}  ", line_no, width = width);
     let escaped = renderer.escape(&prefix);
     out += &renderer.unstyled(&escaped);
@@ -583,15 +658,16 @@ fn render_highlights_with_numbers(
   out + &renderer.tail()
 }
 
-fn number_plain_text(text: &str) -> String {
+fn number_plain_text(text: &str, line_number_start: usize) -> String {
   let line_count = count_lines_bytes(text.as_bytes());
   if line_count == 0 {
     return String::new();
   }
 
-  let width = line_number_width(line_count);
+  let last_line_no = line_number_start.saturating_add(line_count.saturating_sub(1));
+  let width = line_number_width(last_line_no);
   let mut out = String::new();
-  let mut line_no = 1;
+  let mut line_no = line_number_start;
   for chunk in text.split_inclusive('\n') {
     let _ = write!(out, "{:>width$}  ", line_no, width = width);
     out.push_str(chunk);
@@ -600,14 +676,15 @@ fn number_plain_text(text: &str) -> String {
   out
 }
 
-fn write_numbered_bytes(stdout: &mut impl Write, bytes: &[u8]) -> Result<()> {
+fn write_numbered_bytes(stdout: &mut impl Write, bytes: &[u8], line_number_start: usize) -> Result<()> {
   let line_count = count_lines_bytes(bytes);
   if line_count == 0 {
     return Ok(());
   }
 
-  let width = line_number_width(line_count);
-  let mut line_no = 1;
+  let last_line_no = line_number_start.saturating_add(line_count.saturating_sub(1));
+  let width = line_number_width(last_line_no);
+  let mut line_no = line_number_start;
   write_prefix(stdout, line_no, width)?;
   for (index, byte) in bytes.iter().enumerate() {
     stdout.write_all(&[*byte])?;
@@ -668,6 +745,16 @@ fn apply_style_line_numbers(current: bool, style: &str) -> bool {
   line_numbers
 }
 
+fn display_name_for_spec(spec: &FileSpec, stdin_name: Option<&Path>) -> String {
+  if spec.path == Path::new("-") {
+    stdin_name
+      .map(|path| path.to_string_lossy().to_string())
+      .unwrap_or_else(|| "-".to_string())
+  } else {
+    spec.path.to_string_lossy().to_string()
+  }
+}
+
 fn squeeze_blank_lines_bytes(bytes: &[u8], limit: usize) -> Vec<u8> {
   if bytes.is_empty() {
     return Vec::new();
@@ -710,6 +797,114 @@ fn squeeze_blank_lines_bytes(bytes: &[u8], limit: usize) -> Vec<u8> {
     } else {
       out.extend_from_slice(line);
     }
+  }
+  out
+}
+
+fn parse_file_spec(path: PathBuf, default_range: Option<LineRange>) -> Result<FileSpec> {
+  let raw = path.to_string_lossy();
+  if let Some((path_part, line_range)) = parse_line_range_suffix(&raw)? {
+    let parsed_path = PathBuf::from(path_part);
+    return Ok(FileSpec {
+      path: parsed_path,
+      line_range: Some(line_range),
+    });
+  }
+  Ok(FileSpec {
+    path,
+    line_range: default_range,
+  })
+}
+
+fn parse_line_range_suffix(raw: &str) -> Result<Option<(String, LineRange)>> {
+  let (path_part, range_part) = match raw.rsplit_once("#L").or_else(|| raw.rsplit_once("#l")) {
+    Some(parts) => parts,
+    None => return Ok(None),
+  };
+  if path_part.is_empty() {
+    return Err(eyre!("missing file path before line range"));
+  }
+  if range_part.is_empty() {
+    return Err(eyre!("missing line range after #L"));
+  }
+  let line_range = parse_line_range(range_part).ok_or_else(|| {
+    eyre!(
+      "invalid line range '#L{range_part}' (expected #L<start>-<end>, #L<start>:<end>, #L<start>,<end>, or #L<start>)"
+    )
+  })?;
+  Ok(Some((path_part.to_string(), line_range)))
+}
+
+fn parse_line_range_arg(raw: &str) -> Result<LineRange> {
+  parse_line_range(raw).ok_or_else(|| {
+    eyre!("invalid line range '{raw}' (expected start-end, start:end, start,end, or start)")
+  })
+}
+
+fn parse_line_range(raw: &str) -> Option<LineRange> {
+  let raw = raw.trim();
+  let raw = raw.strip_prefix('L').or_else(|| raw.strip_prefix('l')).unwrap_or(raw);
+  if raw.is_empty() {
+    return None;
+  }
+  let (start_raw, end_raw) = match split_line_range(raw) {
+    Some(parts) => parts,
+    None => {
+      let line = raw.parse::<usize>().ok()?;
+      if line == 0 {
+        return None;
+      }
+      return Some(LineRange {
+        start: line,
+        end: line,
+      });
+    }
+  };
+  if start_raw.is_empty() || end_raw.is_empty() {
+    return None;
+  }
+  let start_raw = start_raw.trim();
+  let end_raw = end_raw.trim();
+  let start = start_raw.parse::<usize>().ok()?;
+  let end_raw = end_raw.strip_prefix('L').or_else(|| end_raw.strip_prefix('l')).unwrap_or(end_raw);
+  let end = end_raw.parse::<usize>().ok()?;
+  if start == 0 || end == 0 || end < start {
+    return None;
+  }
+  Some(LineRange { start, end })
+}
+
+fn split_line_range(raw: &str) -> Option<(&str, &str)> {
+  for separator in ['-', ':', ','] {
+    if let Some(parts) = raw.split_once(separator) {
+      return Some(parts);
+    }
+  }
+  None
+}
+
+fn slice_bytes_by_line_range(bytes: &[u8], range: LineRange) -> Vec<u8> {
+  if bytes.is_empty() {
+    return Vec::new();
+  }
+  let mut out = Vec::new();
+  let mut line_no = 1usize;
+  let mut start = 0usize;
+  for (index, byte) in bytes.iter().enumerate() {
+    if *byte == b'\n' {
+      let line_end = index + 1;
+      if line_no >= range.start && line_no <= range.end {
+        out.extend_from_slice(&bytes[start..line_end]);
+      }
+      line_no += 1;
+      if line_no > range.end {
+        return out;
+      }
+      start = line_end;
+    }
+  }
+  if start < bytes.len() && line_no >= range.start && line_no <= range.end {
+    out.extend_from_slice(&bytes[start..]);
   }
   out
 }
