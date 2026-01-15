@@ -110,19 +110,16 @@ mcp__rust-lsp__completion "crates/slipstreamd/src/routes.rs" 42 20
 - Never ignore errors - propagate or handle explicitly
 
 ## Commit Messages
-- Write clear, descriptive commit messages in plain English
-- Do NOT use conventional commits, semantic commits, or any commit prefixes (no "feat:", "fix:", "refactor:", etc.)
-- Focus on WHAT changed and WHY, not the type of change
-- First line should be a clear summary (50-72 chars recommended)
-- Use the body for detailed explanation if needed
-- Reference issue IDs when relevant (e.g., "Closes: slipstream-24")
+- Commit messages follow Conventional Commits (examples: `feat: ...`, `fix: ...`, `chore: ...`, `refactor: ...`, `test: ...`, `docs: ...`).
+- Keep the first line a clear summary (50-72 chars recommended).
+- Use the body for detailed explanation if needed.
 
 Good examples:
-- "Split search into dedicated Searcher service"
-- "Add reranking provider for DeepInfra Qwen3-Reranker"
-- "Fix flaky test by increasing tolerance for timing variance"
+- "feat: add automatic theme detection"
+- "fix: handle binary stdin safely"
+- "chore: update dependencies"
 
 Bad examples:
-- "refactor(embedding): Split search into dedicated Searcher service"
-- "feat: add reranking provider"
-- "fix: flaky test"
+- "Update stuff"
+- "WIP"
+- "feat add thing"

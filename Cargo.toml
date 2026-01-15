@@ -6,9 +6,17 @@ authors = ["Ivan Porto Carrero"]
 description = "cat with syntax highlighting - a modern replacement for cat with tree-sitter powered syntax highlighting"
 license = "MIT"
 repository = "https://github.com/casualjim/scat"
+homepage = "https://github.com/casualjim/scat"
 readme = "README.md"
 keywords = ["cat", "syntax-highlighting", "cli", "terminal", "tree-sitter"]
 categories = ["command-line-utilities", "text-processing"]
+
+[package.metadata.release]
+sign-commit = false
+sign-tag = false
+publish = false
+allow-branch = ["main"]
+pre-release-commit-message = "chore: Release {{crate_name}} version {{version}}"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -24,3 +32,8 @@ syntastica-themes = "0.6.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "=5.12.0"
 zvariant = "=5.8.0"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

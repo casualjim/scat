@@ -1,0 +1,89 @@
+name: Cut Release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  cut-release:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure git identity
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-release and git-cliff
+        run: cargo binstall -y cargo-release git-cliff
+
+      - name: Compute next patch version
+        id: version
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+
+          with open("Cargo.toml", "rb") as f:
+              data = tomllib.load(f)
+
+          version = data["package"]["version"]
+          major, minor, patch = (int(x) for x in version.split(".", 2))
+          next_version = f"{major}.{minor}.{patch + 1}"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"next_version={next_version}\n")
+          PY
+
+      - name: Generate changelog
+        run: git-cliff --tag v${{ steps.version.outputs.next_version }} -o CHANGELOG.md
+
+      - name: Commit changelog
+        run: |
+          git add CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "No changelog changes to commit"
+            exit 0
+          fi
+          git commit -m "chore: update changelog for v${{ steps.version.outputs.next_version }} [ci skip]"
+
+      - name: Run cargo-release
+        run: cargo release ${{ steps.version.outputs.next_version }} --no-confirm --no-publish --no-push --execute
+
+      - name: Push release commit with GITHUB_TOKEN
+        run: |
+          git config --unset-all http.https://github.com/.extraheader || true
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push origin HEAD
+
+      - name: Push release tag with RELEASE_TOKEN
+        env:
+          TAG_NAME: v${{ steps.version.outputs.next_version }}
+        run: |
+          git config --unset-all http.https://github.com/.extraheader || true
+          git remote set-url origin "https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/${{ github.repository }}.git"
+          git push origin "refs/tags/${TAG_NAME}"
