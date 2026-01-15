@@ -20,6 +20,7 @@ jobs:
     if: github.actor != 'github-actions[bot]' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
     permissions:
       contents: write
+      pull-requests: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -41,21 +42,90 @@ jobs:
       - name: Install cargo-release and git-cliff
         run: cargo binstall -y cargo-release git-cliff
 
-      - name: Compute next patch version
+      - name: Determine version bump
+        id: bump
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const bumpTokens = [
+              { token: "bump:major", level: "major" },
+              { token: "bump:minor", level: "minor" },
+              { token: "bump:patch", level: "patch" },
+            ];
+            const headSha = (context.eventName === "workflow_run")
+              ? context.payload.workflow_run.head_sha
+              : context.sha;
+            let text = "";
+            let source = "";
+
+            const pulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: headSha,
+            });
+
+            if (pulls.data && pulls.data.length > 0) {
+              const pr = pulls.data[0];
+              text = `${pr.title}\n${pr.body || ""}`;
+              source = `pr#${pr.number}`;
+            } else {
+              const commit = await github.rest.repos.getCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: headSha,
+              });
+              text = commit.data.commit.message || "";
+              source = "commit";
+            }
+
+            const lower = text.toLowerCase();
+            const found = bumpTokens.filter((t) => lower.includes(t.token));
+            let bump = "patch";
+            if (found.length > 0) {
+              if (found.some((t) => t.level === "major")) {
+                bump = "major";
+              } else if (found.some((t) => t.level === "minor")) {
+                bump = "minor";
+              } else {
+                bump = "patch";
+              }
+            }
+
+            if (found.length > 1) {
+              core.warning(`Multiple bump tokens found (${found.map((t) => t.token).join(", ")}); using ${bump}.`);
+            }
+
+            core.setOutput("head_sha", headSha);
+            core.setOutput("source", source);
+            core.setOutput("bump", bump);
+      - name: Compute next version
         id: version
+        env:
+          BUMP_LEVEL: ${{ steps.bump.outputs.bump }}
         run: |
           python3 - <<'PY'
           import os
           import tomllib
 
+          bump = os.environ["BUMP_LEVEL"]
           with open("Cargo.toml", "rb") as f:
               data = tomllib.load(f)
-
           version = data["package"]["version"]
           major, minor, patch = (int(x) for x in version.split(".", 2))
-          next_version = f"{major}.{minor}.{patch + 1}"
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+          if bump == "major":
+              major += 1
+              minor = 0
+              patch = 0
+          elif bump == "minor":
+              minor += 1
+              patch = 0
+          elif bump == "patch":
+              patch += 1
+          else:
+              raise SystemExit(f"unknown bump level: {bump}")
+          next_version = f"{major}.{minor}.{patch}"
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as f:
               f.write(f"next_version={next_version}\n")
           PY
 
