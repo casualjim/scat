@@ -1,8 +1,18 @@
+## [0.2.0] - 2026-01-15
+
+### 🚀 Features
+
+- Add line selection and file headers
 ## [0.1.6] - 2026-01-15
 
 ### 🚀 Features
 
 - Drive release bumps from pr tokens
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.6 [ci skip]
+- Release scat version 0.1.6
 ## [0.1.5] - 2026-01-15
 
 ### ⚙️ Miscellaneous Tasks
