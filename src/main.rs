@@ -445,7 +445,12 @@ fn detect_language(
 }
 
 fn resolve_language(name: impl AsRef<str>, language_set: &LanguageSetImpl) -> Option<Lang> {
-  let name = name.as_ref();
+  let name = name.as_ref().trim();
+  let normalized = name.to_ascii_lowercase();
+  let name = match normalized.as_str() {
+    "xml" | "xhtml" | "svg" | "plist" => "html",
+    _ => normalized.as_str(),
+  };
   <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_name(name, language_set)
     .ok()
     .or_else(|| <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_injection(name, language_set))
