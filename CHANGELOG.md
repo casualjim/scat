@@ -1,8 +1,18 @@
+## [0.2.1] - 2026-01-16
+
+### 🐛 Bug Fixes
+
+- Alias xml-like languages to html
 ## [0.2.0] - 2026-01-15
 
 ### 🚀 Features
 
 - Add line selection and file headers
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.0 [ci skip]
+- Release scat version 0.2.0
 ## [0.1.6] - 2026-01-15
 
 ### 🚀 Features
