@@ -1,3 +1,24 @@
+## [0.3.0] - 2026-01-23
+
+### 🚀 Features
+
+- Add decorations support (git changes, line numbers, grid)
+- Add --show-all flag to display unprintable characters
+- Add --no-color flag and NO_COLOR env var support
+
+### 🚜 Refactor
+
+- Simplify CLI flags and improve file headers
+
+### 📚 Documentation
+
+- Update README with git decorations feature
+## [0.2.2] - 2026-01-23
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.2 [ci skip]
+- Release scat version 0.2.2
 ## [0.2.1] - 2026-01-16
 
 ### 🐛 Bug Fixes
