@@ -123,6 +123,9 @@ struct Cli {
   )]
   color: ColorWhen,
 
+  #[arg(long, help = "Disable colored output")]
+  no_color: bool,
+
   #[arg(long, help = "List supported themes")]
   list_themes: bool,
 
@@ -211,6 +214,10 @@ fn main() -> Result<()> {
     return Ok(());
   }
   let mut use_color = io::stdout().is_terminal();
+  // Check --no-color flag and NO_COLOR environment variable (https://no-color.org/)
+  if cli.no_color || std::env::var("NO_COLOR").is_ok() {
+    use_color = false;
+  }
   match cli.color {
     ColorWhen::Auto => {}
     ColorWhen::Never => use_color = false,
