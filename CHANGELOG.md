@@ -3,6 +3,11 @@
 ### 🐛 Bug Fixes
 
 - Alias xml-like languages to html
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.2.1 [ci skip]
+- Release scat version 0.2.1
 ## [0.2.0] - 2026-01-15
 
 ### 🚀 Features
