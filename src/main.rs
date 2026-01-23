@@ -1,6 +1,7 @@
 mod custom_langs;
 mod decorations;
 mod git;
+mod unprintable;
 
 use std::fmt::Write as _;
 use std::fs;
@@ -192,6 +193,13 @@ struct Cli {
 
   #[arg(
     long,
+    short = 'A',
+    help = "Show unprintable characters (tabs as →, carriage returns as ↵, etc.)"
+  )]
+  show_all: bool,
+
+  #[arg(
+    long,
     help = "Generate man page",
     long_help = "Generate a manual page in roff format and print to stdout.\n\
                  You can save this to a file and install it in your man path.\n\n\
@@ -332,6 +340,7 @@ fn main() -> Result<()> {
         use_color,
         squeeze_blank,
         squeeze_limit,
+        cli.show_all,
         &language_set,
         &mut processor,
         &mut renderer,
@@ -353,6 +362,7 @@ fn main() -> Result<()> {
           use_color,
           squeeze_blank,
           squeeze_limit,
+          cli.show_all,
           &language_set,
           &mut processor,
           &mut renderer,
@@ -405,6 +415,7 @@ fn emit_bytes(
   use_color: bool,
   squeeze_blank: bool,
   squeeze_limit: usize,
+  show_all: bool,
   language_set: &Union<CustomLanguageSet, LanguageSetImpl>,
   processor: &mut Processor<Union<CustomLanguageSet, LanguageSetImpl>>,
   renderer: &mut TerminalRenderer,
@@ -422,8 +433,20 @@ fn emit_bytes(
   };
   let line_number_start = line_range.map(|range| range.start).unwrap_or(1);
   let ended_with_newline = bytes.last() == Some(&b'\n') || bytes.is_empty();
+
+  // Handle show_all flag for non-color, non-decoration case
   if !use_color && !decoration_config.has_decorations() {
-    stdout.write_all(&bytes)?;
+    if show_all {
+      if let Ok(text) = String::from_utf8(bytes.clone()) {
+        let transformed = unprintable::show_unprintable(&text, unprintable::get_char_style());
+        stdout.write_all(transformed.as_bytes())?;
+      } else {
+        // Invalid UTF-8, write as-is
+        stdout.write_all(&bytes)?;
+      }
+    } else {
+      stdout.write_all(&bytes)?;
+    }
     return Ok(ended_with_newline);
   }
 
@@ -458,6 +481,7 @@ fn emit_bytes(
           processor,
           renderer,
           theme,
+          show_all,
         );
         stdout.write_all(rendered.as_bytes())?;
         return Ok(ended_with_newline);
@@ -466,6 +490,11 @@ fn emit_bytes(
         let bytes = err.into_bytes();
         if decoration_config.show_numbers {
           write_numbered_bytes(stdout, &bytes, line_number_start)?;
+        } else if show_all {
+          // Try to convert what we can, handling invalid UTF-8
+          let text = String::from_utf8_lossy(&bytes);
+          let transformed = unprintable::show_unprintable(&text, unprintable::get_char_style());
+          stdout.write_all(transformed.as_bytes())?;
         } else {
           stdout.write_all(&bytes)?;
         }
@@ -475,7 +504,25 @@ fn emit_bytes(
   }
 
   if decoration_config.show_numbers {
-    write_numbered_bytes(stdout, &bytes, line_number_start)?;
+    if show_all {
+      // Use number_plain_text when show_all is enabled
+      if let Ok(text) = String::from_utf8(bytes.clone()) {
+        let numbered = number_plain_text(&text, line_number_start, show_all);
+        stdout.write_all(numbered.as_bytes())?;
+      } else {
+        write_numbered_bytes(stdout, &bytes, line_number_start)?;
+      }
+    } else {
+      write_numbered_bytes(stdout, &bytes, line_number_start)?;
+    }
+  } else if show_all {
+    // Handle show_all for non-color case with decorations
+    if let Ok(text) = String::from_utf8(bytes.clone()) {
+      let transformed = unprintable::show_unprintable(&text, unprintable::get_char_style());
+      stdout.write_all(transformed.as_bytes())?;
+    } else {
+      stdout.write_all(&bytes)?;
+    }
   } else {
     stdout.write_all(&bytes)?;
   }
@@ -629,10 +676,13 @@ fn render_text(
   processor: &mut Processor<Union<CustomLanguageSet, LanguageSetImpl>>,
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
+  show_all: bool,
 ) -> String {
   let Some(language) = language else {
     return if decoration_config.show_numbers {
-      number_plain_text(text, line_number_start)
+      number_plain_text(text, line_number_start, show_all)
+    } else if show_all {
+      unprintable::show_unprintable(text, unprintable::get_char_style())
     } else {
       text.to_string()
     };
@@ -648,19 +698,73 @@ fn render_text(
           git_changes,
           renderer,
           theme,
+          show_all,
         )
+      } else if show_all {
+        // Render with show_all transformation applied before terminal escapes
+        render_highlights_show_all(&highlights, renderer, theme)
       } else {
         syntastica::render(&highlights, renderer, theme.clone())
       }
     }
     Err(_) => {
       if decoration_config.show_numbers {
-        number_plain_text(text, line_number_start)
+        number_plain_text(text, line_number_start, show_all)
+      } else if show_all {
+        unprintable::show_unprintable(text, unprintable::get_char_style())
       } else {
         text.to_string()
       }
     }
   }
+}
+
+/// Render highlights with show_all transformation applied before terminal escape sequences are added.
+/// This ensures we only transform unprintable characters in the source text, not ANSI escape codes.
+fn render_highlights_show_all(
+  highlights: &syntastica::Highlights<'_>,
+  renderer: &mut TerminalRenderer,
+  theme: &ResolvedTheme,
+) -> String {
+  let char_style = unprintable::get_char_style();
+  let mut result = String::new();
+  let last_line = highlights.len().saturating_sub(1);
+
+  // Determine the line feed marker to use
+  let lf_marker = if matches!(char_style, unprintable::CharStyle::Unicode) {
+    "␊"
+  } else {
+    "$"
+  };
+
+  for (index, line) in highlights.iter().enumerate() {
+    let line_has_content = line.iter().any(|(text, _)| !text.is_empty());
+    for (text, style) in line.iter() {
+      // Transform unprintable characters in the text
+      let transformed = unprintable::show_unprintable(text, char_style);
+      // Apply styling if present
+      if let Some(style_name) = style {
+        // Look up the Style from the theme using the style name
+        if let Some(style_obj) = theme.get(*style_name) {
+          result.push_str(&renderer.styled(transformed.as_str(), *style_obj));
+        } else {
+          result.push_str(&transformed);
+        }
+      } else {
+        result.push_str(&transformed);
+      }
+    }
+    // Add line feed marker at the end of each line that has content
+    if line_has_content {
+      result.push_str(lf_marker);
+    }
+    // Add newline between lines, but not after the last line
+    if index != last_line {
+      result.push_str(&renderer.newline());
+    }
+  }
+
+  result
 }
 
 fn resolve_theme_with_overrides(
@@ -713,6 +817,7 @@ fn render_highlights_with_decorations(
   git_changes: &[Option<git::LineChange>],
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
+  show_all: bool,
 ) -> String {
   if highlights.is_empty() {
     return String::new();
@@ -739,9 +844,17 @@ fn render_highlights_with_decorations(
     let line_change = git_changes.get(index).copied().flatten();
 
     // Convert highlights to the format expected by the decorations module
+    // Apply unprintable character transformation if show_all is enabled
     let line_content: Vec<(String, Option<String>)> = line
       .iter()
-      .map(|(text, style)| (text.to_string(), style.map(|s| s.to_string())))
+      .map(|(text, style)| {
+        let transformed_text = if show_all {
+          unprintable::show_unprintable(text, unprintable::get_char_style())
+        } else {
+          text.to_string()
+        };
+        (transformed_text, style.map(|s| s.to_string()))
+      })
       .collect();
 
     let rendered = decorations::render_decorated_line(
@@ -756,6 +869,20 @@ fn render_highlights_with_decorations(
 
     out.push_str(&rendered);
 
+    // Add line feed marker at the end of each line when show_all is enabled
+    // Only add it to lines that have actual content
+    if show_all {
+      let line_has_content = line.iter().any(|(text, _)| !text.is_empty());
+      if line_has_content {
+        let lf_marker = if matches!(unprintable::get_char_style(), unprintable::CharStyle::Unicode) {
+          "␊"
+        } else {
+          "$"
+        };
+        out.push_str(lf_marker);
+      }
+    }
+
     if index != last_line {
       out += &renderer.newline();
     }
@@ -764,7 +891,7 @@ fn render_highlights_with_decorations(
   out + &renderer.tail()
 }
 
-fn number_plain_text(text: &str, line_number_start: usize) -> String {
+fn number_plain_text(text: &str, line_number_start: usize, show_all: bool) -> String {
   let line_count = count_lines_bytes(text.as_bytes());
   if line_count == 0 {
     return String::new();
@@ -774,9 +901,15 @@ fn number_plain_text(text: &str, line_number_start: usize) -> String {
   let width = line_number_width(last_line_no);
   let mut out = String::new();
   let mut line_no = line_number_start;
+
   for chunk in text.split_inclusive('\n') {
     let _ = write!(out, "{:>width$}  ", line_no, width = width);
-    out.push_str(chunk);
+    let content = if show_all {
+      unprintable::show_unprintable(chunk, unprintable::get_char_style())
+    } else {
+      chunk.to_string()
+    };
+    out.push_str(&content);
     line_no += 1;
   }
   out
