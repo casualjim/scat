@@ -15,6 +15,8 @@ pub struct DecorationConfig {
   pub show_numbers: bool,
   /// Show git change indicators
   pub show_changes: bool,
+  /// Show file headers between multiple files
+  pub show_headers: bool,
 }
 
 impl DecorationConfig {

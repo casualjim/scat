@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{self, Cursor, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
 use dark_light::Mode as DarkLightMode;
 use decorations::DecorationConfig;
 use eyre::{Result, eyre};
@@ -68,15 +68,6 @@ struct Cli {
 
   #[arg(
     long,
-    short = 'p',
-    action = ArgAction::Count,
-    help = "Only show plain style, no decorations",
-    long_help = "Only show plain style, no decorations."
-  )]
-  plain: u8,
-
-  #[arg(
-    long,
     short = 'l',
     value_name = "LANG",
     help = "Force a specific programming language",
@@ -111,29 +102,7 @@ struct Cli {
 
   #[arg(
     long,
-    value_name = "THEME",
-    help = "Theme for light backgrounds (used with --theme=auto/light)"
-  )]
-  theme_light: Option<String>,
-
-  #[arg(
-    long,
-    value_name = "THEME",
-    help = "Theme for dark backgrounds (used with --theme=auto/dark)"
-  )]
-  theme_dark: Option<String>,
-
-  #[arg(
-    long,
     short = 'n',
-    help = "Show line numbers",
-    long_help = "Display line numbers at the beginning of each line.\n\
-                 Line numbers are right-aligned and separated from the content by two spaces."
-  )]
-  line_numbers: bool,
-
-  #[arg(
-    long,
     value_name = "RANGE",
     help = "Show only selected lines (e.g. 10-20, 10:20, 10,20, 10)",
     long_help = "Show only selected lines from the file.\n\
@@ -153,16 +122,6 @@ struct Cli {
     help = "Specify when to use colored output"
   )]
   color: ColorWhen,
-
-  #[arg(long, help = "Show file headers between files")]
-  file_headers: bool,
-
-  #[arg(
-    long,
-    value_name = "name",
-    help = "Specify the name to display for stdin (used with --file-headers)"
-  )]
-  file_name: Option<PathBuf>,
 
   #[arg(long, help = "List supported themes")]
   list_themes: bool,
@@ -261,11 +220,7 @@ fn main() -> Result<()> {
   let custom_set = CustomLanguageSet::new();
   let parser_set = LanguageSetImpl::new();
   let language_set = Union::new(custom_set, parser_set);
-  let theme = resolve_theme_with_overrides(
-    &cli.theme,
-    cli.theme_light.as_deref(),
-    cli.theme_dark.as_deref(),
-  );
+  let theme = resolve_theme(&cli.theme);
   let decoration_config = resolve_decoration_config(&cli);
   let squeeze_limit = cli.squeeze_limit.unwrap_or(1);
   let squeeze_blank = cli.squeeze_blank || cli.squeeze_limit.is_some();
@@ -300,25 +255,34 @@ fn main() -> Result<()> {
     }
   }
 
-  let show_headers = cli.file_headers && file_specs.len() > 1;
   let mut processor = Processor::new(&language_set);
   let mut renderer = TerminalRenderer::new(None);
   let mut stdout = io::stdout().lock();
   let mut stdin = io::stdin();
   let mut stdin_consumed = false;
-  let mut last_ended_with_newline = true;
   let mut wrote_output = false;
+  let multiple_files = file_specs.len() > 1;
 
   for spec in file_specs {
-    if show_headers {
-      if wrote_output && !last_ended_with_newline {
+    // Show file header between files when headers are enabled
+    if decoration_config.show_headers && multiple_files {
+      if wrote_output {
         writeln!(stdout)?;
       }
-      let display_name = display_name_for_spec(&spec, cli.file_name.as_deref());
-      writeln!(stdout, "==> {display_name} <==")?;
-      wrote_output = true;
-      last_ended_with_newline = true;
+      let display_name = display_name_for_spec(&spec);
+      // Get terminal width, default to 80 if unavailable
+      let term_width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
+      // Create a prominent header that spans the terminal width
+      let border = "─".repeat(term_width);
+      writeln!(stdout, "{border}")?;
+      // Center the filename in the header
+      let padding = (term_width.saturating_sub(display_name.len())) / 2;
+      writeln!(stdout, "{}{}{}", " ".repeat(padding), display_name, " ".repeat(term_width - display_name.len() - padding))?;
+      writeln!(stdout, "{border}")?;
     }
+
     if spec.path == Path::new("-") {
       if stdin_consumed {
         continue;
@@ -330,10 +294,10 @@ fn main() -> Result<()> {
         had_error = true;
         continue;
       }
-      last_ended_with_newline = emit_bytes(
+      emit_bytes(
         &mut stdout,
         buf,
-        cli.file_name.as_deref(),
+        None,
         spec.line_range,
         language_override.as_ref().map(clone_either_lang),
         decoration_config,
@@ -352,7 +316,7 @@ fn main() -> Result<()> {
 
     match fs::read(&spec.path) {
       Ok(buf) => {
-        last_ended_with_newline = emit_bytes(
+        emit_bytes(
           &mut stdout,
           buf,
           Some(&spec.path),
@@ -767,46 +731,29 @@ fn render_highlights_show_all(
   result
 }
 
-fn resolve_theme_with_overrides(
-  theme: &str,
-  theme_light: Option<&str>,
-  theme_dark: Option<&str>,
-) -> ResolvedTheme {
-  let override_name = theme.trim();
-  let theme_key = override_name.split(':').next().unwrap_or("auto");
+fn resolve_theme(theme: &str) -> ResolvedTheme {
+  let theme_name = theme.trim();
+  let theme_key = theme_name.split(':').next().unwrap_or("auto");
 
   match theme_key {
-    "" | "auto" => resolve_auto_theme(theme_light, theme_dark),
-    "dark" => resolve_named_theme(theme_dark, true),
-    "light" => resolve_named_theme(theme_light, false),
+    "" | "auto" => resolve_auto_theme(),
+    "dark" => syntastica_themes::catppuccin::mocha(),
+    "light" => syntastica_themes::catppuccin::latte(),
     _ => {
       if let Some(theme) = syntastica_themes::from_str(theme_key) {
         return theme;
       }
-      resolve_auto_theme(theme_light, theme_dark)
+      resolve_auto_theme()
     }
   }
 }
 
-fn resolve_named_theme(override_name: Option<&str>, prefer_dark: bool) -> ResolvedTheme {
-  if let Some(name) = override_name
-    && let Some(theme) = syntastica_themes::from_str(name.trim())
-  {
-    return theme;
-  }
-  if prefer_dark {
-    syntastica_themes::catppuccin::mocha()
-  } else {
-    syntastica_themes::catppuccin::latte()
-  }
-}
-
-fn resolve_auto_theme(theme_light: Option<&str>, theme_dark: Option<&str>) -> ResolvedTheme {
+fn resolve_auto_theme() -> ResolvedTheme {
   match dark_light::detect() {
-    Ok(DarkLightMode::Light) => resolve_named_theme(theme_light, false),
-    Ok(DarkLightMode::Dark) => resolve_named_theme(theme_dark, true),
-    Ok(DarkLightMode::Unspecified) => resolve_named_theme(theme_dark, true),
-    Err(_) => resolve_named_theme(theme_dark, true),
+    Ok(DarkLightMode::Light) => syntastica_themes::catppuccin::latte(),
+    Ok(DarkLightMode::Dark) => syntastica_themes::catppuccin::mocha(),
+    Ok(DarkLightMode::Unspecified) => syntastica_themes::catppuccin::mocha(),
+    Err(_) => syntastica_themes::catppuccin::mocha(),
   }
 }
 
@@ -964,49 +911,32 @@ fn line_number_width(line_count: usize) -> usize {
 fn resolve_decoration_config(cli: &Cli) -> DecorationConfig {
   let mut config = DecorationConfig::default();
 
-  // Start with command line flags
-  if cli.line_numbers {
-    config.show_numbers = true;
-  }
-
-  // Apply style components from --style flag
+  // Parse style components from --style flag
   if let Some(style) = cli.style.as_deref() {
     config = parse_style_components(config, style);
-  }
-
-  // Apply plain flag (turns off all decorations)
-  if cli.plain > 0 {
-    config.show_numbers = false;
-    config.show_changes = false;
-  }
-
-  // Explicit --line-number flag overrides everything
-  if cli.line_numbers {
-    config.show_numbers = true;
   }
 
   config
 }
 
 /// Parse style components from the --style flag.
-/// Supports: "numbers", "changes"
+/// Supports: "numbers", "changes", "headers"
 fn parse_style_components(mut config: DecorationConfig, style: &str) -> DecorationConfig {
   for raw in style.split(',') {
     let token = raw.trim();
     match token {
       "numbers" => config.show_numbers = true,
       "changes" => config.show_changes = true,
+      "headers" => config.show_headers = true,
       _ => {}
     }
   }
   config
 }
 
-fn display_name_for_spec(spec: &FileSpec, stdin_name: Option<&Path>) -> String {
+fn display_name_for_spec(spec: &FileSpec) -> String {
   if spec.path == Path::new("-") {
-    stdin_name
-      .map(|path| path.to_string_lossy().to_string())
-      .unwrap_or_else(|| "-".to_string())
+    "-".to_string()
   } else {
     spec.path.to_string_lossy().to_string()
   }
