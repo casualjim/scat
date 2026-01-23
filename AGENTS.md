@@ -11,7 +11,7 @@ Always default to the `mise` tasks below; only run direct toolchain commands if 
 **For code navigation and understanding, use the Rust LSP!** See the "Code Navigation (Use Rust LSP!)" section above for detailed commands.
 
 - `mise install`: Install pinned Rust, Bun, Wrangler, etc.
-- `mise build:debug`: Build Rust 
+- `mise build:debug`: Build Rust
 - `mise test`: All tests (Rust nextest + Workers via bun test).
 
 ## Release Process (PR-Driven Bumps)

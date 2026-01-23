@@ -33,6 +33,9 @@ syntastica-themes = "0.6.1"
 tree-sitter-hcl = "1"
 tree-sitter-language = "0.1"
 
+git2 = { version = "0.19", default-features = false }
+similar = { version = "2.6", default-features = false, features = ["text"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "=5.12.0"
 zvariant = "=5.8.0"

@@ -1,4 +1,6 @@
 mod custom_langs;
+mod decorations;
+mod git;
 
 use std::fmt::Write as _;
 use std::fs;
@@ -7,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use dark_light::Mode as DarkLightMode;
+use decorations::DecorationConfig;
 use eyre::{Result, eyre};
 use palate::detectors;
 use syntastica::Processor;
@@ -180,7 +183,7 @@ struct Cli {
   #[arg(
     long,
     value_name = "components",
-    help = "Configure which style components to display"
+    help = "Configure which style components to display (numbers, changes)"
   )]
   style: Option<String>,
 
@@ -255,7 +258,7 @@ fn main() -> Result<()> {
     cli.theme_light.as_deref(),
     cli.theme_dark.as_deref(),
   );
-  let line_numbers = resolve_line_numbers(&cli);
+  let decoration_config = resolve_decoration_config(&cli);
   let squeeze_limit = cli.squeeze_limit.unwrap_or(1);
   let squeeze_blank = cli.squeeze_blank || cli.squeeze_limit.is_some();
   let language_override = match cli.language.as_deref() {
@@ -324,8 +327,8 @@ fn main() -> Result<()> {
         buf,
         cli.file_name.as_deref(),
         spec.line_range,
-        language_override.as_ref().map(|l| clone_either_lang(l)),
-        line_numbers,
+        language_override.as_ref().map(clone_either_lang),
+        decoration_config,
         use_color,
         squeeze_blank,
         squeeze_limit,
@@ -345,8 +348,8 @@ fn main() -> Result<()> {
           buf,
           Some(&spec.path),
           spec.line_range,
-          language_override.as_ref().map(|l| clone_either_lang(l)),
-          line_numbers,
+          language_override.as_ref().map(clone_either_lang),
+          decoration_config,
           use_color,
           squeeze_blank,
           squeeze_limit,
@@ -391,13 +394,14 @@ fn clone_either_lang(lang: &EitherLang<CustomLang, Lang>) -> EitherLang<CustomLa
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_bytes(
   stdout: &mut impl Write,
   bytes: Vec<u8>,
   path: Option<&Path>,
   line_range: Option<LineRange>,
   language_override: Option<EitherLang<CustomLang, Lang>>,
-  line_numbers: bool,
+  decoration_config: DecorationConfig,
   use_color: bool,
   squeeze_blank: bool,
   squeeze_limit: usize,
@@ -418,10 +422,28 @@ fn emit_bytes(
   };
   let line_number_start = line_range.map(|range| range.start).unwrap_or(1);
   let ended_with_newline = bytes.last() == Some(&b'\n') || bytes.is_empty();
-  if !use_color && !line_numbers {
+  if !use_color && !decoration_config.has_decorations() {
     stdout.write_all(&bytes)?;
     return Ok(ended_with_newline);
   }
+
+  // Fetch git changes if needed (only for actual file paths, not stdin)
+  let git_changes = if decoration_config.show_changes {
+    // Only check git for real file paths (not stdin "-")
+    if let Some(p) = path {
+      if p != Path::new("-") {
+        // Convert to absolute path for git detection
+        let abs_path = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        git::get_git_line_changes(&abs_path).unwrap_or_default()
+      } else {
+        Vec::new()
+      }
+    } else {
+      Vec::new()
+    }
+  } else {
+    Vec::new()
+  };
 
   if use_color {
     match String::from_utf8(bytes) {
@@ -430,8 +452,9 @@ fn emit_bytes(
         let rendered = render_text(
           &text,
           language,
-          line_numbers,
+          decoration_config,
           line_number_start,
+          &git_changes,
           processor,
           renderer,
           theme,
@@ -441,7 +464,7 @@ fn emit_bytes(
       }
       Err(err) => {
         let bytes = err.into_bytes();
-        if line_numbers {
+        if decoration_config.show_numbers {
           write_numbered_bytes(stdout, &bytes, line_number_start)?;
         } else {
           stdout.write_all(&bytes)?;
@@ -451,7 +474,11 @@ fn emit_bytes(
     }
   }
 
-  write_numbered_bytes(stdout, &bytes, line_number_start)?;
+  if decoration_config.show_numbers {
+    write_numbered_bytes(stdout, &bytes, line_number_start)?;
+  } else {
+    stdout.write_all(&bytes)?;
+  }
   Ok(ended_with_newline)
 }
 
@@ -499,10 +526,9 @@ fn resolve_language_union(
     .iter()
     .copied()
     .find(|candidate| candidate.eq_ignore_ascii_case(name))
+    && let Ok(lang) = <Lang as SupportedLanguage<'_, _>>::for_name(canonical, language_set)
   {
-    if let Ok(lang) = <Lang as SupportedLanguage<'_, _>>::for_name(canonical, language_set) {
-      return Some(EitherLang::Right(lang));
-    }
+    return Some(EitherLang::Right(lang));
   }
 
   None
@@ -512,20 +538,20 @@ fn detect_language_name(path: Option<&Path>, content: &str) -> Option<&'static s
   let mut extension: Option<String> = None;
   let mut candidates = Vec::new();
 
-  if let Some(path) = path {
-    if let Some(filename) = path.file_name().and_then(|name| name.to_str()) {
-      if let Some(candidate) = detectors::get_language_from_filename(filename) {
-        return Some(candidate);
-      }
+  if let Some(path) = path
+    && let Some(filename) = path.file_name().and_then(|name| name.to_str())
+  {
+    if let Some(candidate) = detectors::get_language_from_filename(filename) {
+      return Some(candidate);
+    }
 
-      extension = detectors::get_extension(filename).map(str::to_string);
-      candidates = extension
-        .as_deref()
-        .map(detectors::get_languages_from_extension)
-        .unwrap_or_else(Vec::new);
-      if candidates.len() == 1 {
-        return Some(candidates[0]);
-      }
+    extension = detectors::get_extension(filename).map(str::to_string);
+    candidates = extension
+      .as_deref()
+      .map(detectors::get_languages_from_extension)
+      .unwrap_or_default();
+    if candidates.len() == 1 {
+      return Some(candidates[0]);
     }
   }
 
@@ -593,17 +619,19 @@ fn truncate_to_char_boundary(s: &str, mut max: usize) -> &str {
   &s[..max]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_text(
   text: &str,
   language: Option<EitherLang<CustomLang, Lang>>,
-  line_numbers: bool,
+  decoration_config: DecorationConfig,
   line_number_start: usize,
+  git_changes: &[Option<git::LineChange>],
   processor: &mut Processor<Union<CustomLanguageSet, LanguageSetImpl>>,
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
 ) -> String {
   let Some(language) = language else {
-    return if line_numbers {
+    return if decoration_config.show_numbers {
       number_plain_text(text, line_number_start)
     } else {
       text.to_string()
@@ -612,14 +640,21 @@ fn render_text(
 
   match processor.process(text, language) {
     Ok(highlights) => {
-      if line_numbers {
-        render_highlights_with_numbers(&highlights, renderer, theme, line_number_start)
+      if decoration_config.has_decorations() {
+        render_highlights_with_decorations(
+          &highlights,
+          decoration_config,
+          line_number_start,
+          git_changes,
+          renderer,
+          theme,
+        )
       } else {
         syntastica::render(&highlights, renderer, theme.clone())
       }
     }
     Err(_) => {
-      if line_numbers {
+      if decoration_config.show_numbers {
         number_plain_text(text, line_number_start)
       } else {
         text.to_string()
@@ -650,10 +685,10 @@ fn resolve_theme_with_overrides(
 }
 
 fn resolve_named_theme(override_name: Option<&str>, prefer_dark: bool) -> ResolvedTheme {
-  if let Some(name) = override_name {
-    if let Some(theme) = syntastica_themes::from_str(name.trim()) {
-      return theme;
-    }
+  if let Some(name) = override_name
+    && let Some(theme) = syntastica_themes::from_str(name.trim())
+  {
+    return theme;
   }
   if prefer_dark {
     syntastica_themes::catppuccin::mocha()
@@ -671,15 +706,28 @@ fn resolve_auto_theme(theme_light: Option<&str>, theme_dark: Option<&str>) -> Re
   }
 }
 
-fn render_highlights_with_numbers(
+fn render_highlights_with_decorations(
   highlights: &syntastica::Highlights<'_>,
+  decoration_config: DecorationConfig,
+  line_number_start: usize,
+  git_changes: &[Option<git::LineChange>],
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
-  line_number_start: usize,
 ) -> String {
   if highlights.is_empty() {
     return String::new();
   }
+
+  // Only show git margin if there are actual changes
+  let has_git_changes = git_changes.iter().any(|c| c.is_some());
+  let effective_config = if has_git_changes {
+    decoration_config
+  } else {
+    DecorationConfig {
+      show_changes: false,
+      ..decoration_config
+    }
+  };
 
   let last_line_no = line_number_start.saturating_add(highlights.len().saturating_sub(1));
   let width = line_number_width(last_line_no);
@@ -688,17 +736,25 @@ fn render_highlights_with_numbers(
 
   for (index, line) in highlights.iter().enumerate() {
     let line_no = line_number_start + index;
-    let prefix = format!("{:>width$}  ", line_no, width = width);
-    let escaped = renderer.escape(&prefix);
-    out += &renderer.unstyled(&escaped);
+    let line_change = git_changes.get(index).copied().flatten();
 
-    for (text, style) in line {
-      let escaped = renderer.escape(text);
-      match style.and_then(|key| theme.find_style(key)) {
-        Some(style) => out += &renderer.styled(&escaped, style),
-        None => out += &renderer.unstyled(&escaped),
-      }
-    }
+    // Convert highlights to the format expected by the decorations module
+    let line_content: Vec<(String, Option<String>)> = line
+      .iter()
+      .map(|(text, style)| (text.to_string(), style.map(|s| s.to_string())))
+      .collect();
+
+    let rendered = decorations::render_decorated_line(
+      &line_content,
+      line_no,
+      &effective_config,
+      line_change,
+      renderer,
+      theme,
+      width,
+    );
+
+    out.push_str(&rendered);
 
     if index != last_line {
       out += &renderer.newline();
@@ -772,31 +828,45 @@ fn line_number_width(line_count: usize) -> usize {
   if width == 0 { 1 } else { width }
 }
 
-fn resolve_line_numbers(cli: &Cli) -> bool {
-  let mut line_numbers = cli.line_numbers;
-  if let Some(style) = cli.style.as_deref() {
-    line_numbers = apply_style_line_numbers(line_numbers, style);
-  }
-  if cli.plain > 0 {
-    line_numbers = false;
-  }
+fn resolve_decoration_config(cli: &Cli) -> DecorationConfig {
+  let mut config = DecorationConfig::default();
+
+  // Start with command line flags
   if cli.line_numbers {
-    line_numbers = true;
+    config.show_numbers = true;
   }
-  line_numbers
+
+  // Apply style components from --style flag
+  if let Some(style) = cli.style.as_deref() {
+    config = parse_style_components(config, style);
+  }
+
+  // Apply plain flag (turns off all decorations)
+  if cli.plain > 0 {
+    config.show_numbers = false;
+    config.show_changes = false;
+  }
+
+  // Explicit --line-number flag overrides everything
+  if cli.line_numbers {
+    config.show_numbers = true;
+  }
+
+  config
 }
 
-fn apply_style_line_numbers(current: bool, style: &str) -> bool {
-  let mut line_numbers = current;
+/// Parse style components from the --style flag.
+/// Supports: "numbers", "changes"
+fn parse_style_components(mut config: DecorationConfig, style: &str) -> DecorationConfig {
   for raw in style.split(',') {
     let token = raw.trim();
     match token {
-      "plain" | "-numbers" => line_numbers = false,
-      "numbers" | "+numbers" => line_numbers = true,
+      "numbers" => config.show_numbers = true,
+      "changes" => config.show_changes = true,
       _ => {}
     }
   }
-  line_numbers
+  config
 }
 
 fn display_name_for_spec(spec: &FileSpec, stdin_name: Option<&Path>) -> String {
