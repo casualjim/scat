@@ -1,12 +1,16 @@
 mod custom_langs;
+mod decorations;
+mod git;
+mod unprintable;
 
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Cursor, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
 use dark_light::Mode as DarkLightMode;
+use decorations::DecorationConfig;
 use eyre::{Result, eyre};
 use palate::detectors;
 use syntastica::Processor;
@@ -64,15 +68,6 @@ struct Cli {
 
   #[arg(
     long,
-    short = 'p',
-    action = ArgAction::Count,
-    help = "Only show plain style, no decorations",
-    long_help = "Only show plain style, no decorations."
-  )]
-  plain: u8,
-
-  #[arg(
-    long,
     short = 'l',
     value_name = "LANG",
     help = "Force a specific programming language",
@@ -107,29 +102,7 @@ struct Cli {
 
   #[arg(
     long,
-    value_name = "THEME",
-    help = "Theme for light backgrounds (used with --theme=auto/light)"
-  )]
-  theme_light: Option<String>,
-
-  #[arg(
-    long,
-    value_name = "THEME",
-    help = "Theme for dark backgrounds (used with --theme=auto/dark)"
-  )]
-  theme_dark: Option<String>,
-
-  #[arg(
-    long,
     short = 'n',
-    help = "Show line numbers",
-    long_help = "Display line numbers at the beginning of each line.\n\
-                 Line numbers are right-aligned and separated from the content by two spaces."
-  )]
-  line_numbers: bool,
-
-  #[arg(
-    long,
     value_name = "RANGE",
     help = "Show only selected lines (e.g. 10-20, 10:20, 10,20, 10)",
     long_help = "Show only selected lines from the file.\n\
@@ -150,15 +123,8 @@ struct Cli {
   )]
   color: ColorWhen,
 
-  #[arg(long, help = "Show file headers between files")]
-  file_headers: bool,
-
-  #[arg(
-    long,
-    value_name = "name",
-    help = "Specify the name to display for stdin (used with --file-headers)"
-  )]
-  file_name: Option<PathBuf>,
+  #[arg(long, help = "Disable colored output")]
+  no_color: bool,
 
   #[arg(long, help = "List supported themes")]
   list_themes: bool,
@@ -180,12 +146,19 @@ struct Cli {
   #[arg(
     long,
     value_name = "components",
-    help = "Configure which style components to display"
+    help = "Configure which style components to display (numbers, changes)"
   )]
   style: Option<String>,
 
   #[arg(long, short = 'u', help = "No-op, output is always unbuffered")]
   unbuffered: bool,
+
+  #[arg(
+    long,
+    short = 'A',
+    help = "Show unprintable characters (tabs as →, carriage returns as ↵, etc.)"
+  )]
+  show_all: bool,
 
   #[arg(
     long,
@@ -241,6 +214,10 @@ fn main() -> Result<()> {
     return Ok(());
   }
   let mut use_color = io::stdout().is_terminal();
+  // Check --no-color flag and NO_COLOR environment variable (https://no-color.org/)
+  if cli.no_color || std::env::var("NO_COLOR").is_ok() {
+    use_color = false;
+  }
   match cli.color {
     ColorWhen::Auto => {}
     ColorWhen::Never => use_color = false,
@@ -250,12 +227,8 @@ fn main() -> Result<()> {
   let custom_set = CustomLanguageSet::new();
   let parser_set = LanguageSetImpl::new();
   let language_set = Union::new(custom_set, parser_set);
-  let theme = resolve_theme_with_overrides(
-    &cli.theme,
-    cli.theme_light.as_deref(),
-    cli.theme_dark.as_deref(),
-  );
-  let line_numbers = resolve_line_numbers(&cli);
+  let theme = resolve_theme(&cli.theme);
+  let decoration_config = resolve_decoration_config(&cli);
   let squeeze_limit = cli.squeeze_limit.unwrap_or(1);
   let squeeze_blank = cli.squeeze_blank || cli.squeeze_limit.is_some();
   let language_override = match cli.language.as_deref() {
@@ -289,25 +262,34 @@ fn main() -> Result<()> {
     }
   }
 
-  let show_headers = cli.file_headers && file_specs.len() > 1;
   let mut processor = Processor::new(&language_set);
   let mut renderer = TerminalRenderer::new(None);
   let mut stdout = io::stdout().lock();
   let mut stdin = io::stdin();
   let mut stdin_consumed = false;
-  let mut last_ended_with_newline = true;
   let mut wrote_output = false;
+  let multiple_files = file_specs.len() > 1;
 
   for spec in file_specs {
-    if show_headers {
-      if wrote_output && !last_ended_with_newline {
+    // Show file header between files when headers are enabled
+    if decoration_config.show_headers && multiple_files {
+      if wrote_output {
         writeln!(stdout)?;
       }
-      let display_name = display_name_for_spec(&spec, cli.file_name.as_deref());
-      writeln!(stdout, "==> {display_name} <==")?;
-      wrote_output = true;
-      last_ended_with_newline = true;
+      let display_name = display_name_for_spec(&spec);
+      // Get terminal width, default to 80 if unavailable
+      let term_width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
+      // Create a prominent header that spans the terminal width
+      let border = "─".repeat(term_width);
+      writeln!(stdout, "{border}")?;
+      // Center the filename in the header
+      let padding = (term_width.saturating_sub(display_name.len())) / 2;
+      writeln!(stdout, "{}{}{}", " ".repeat(padding), display_name, " ".repeat(term_width - display_name.len() - padding))?;
+      writeln!(stdout, "{border}")?;
     }
+
     if spec.path == Path::new("-") {
       if stdin_consumed {
         continue;
@@ -319,16 +301,17 @@ fn main() -> Result<()> {
         had_error = true;
         continue;
       }
-      last_ended_with_newline = emit_bytes(
+      emit_bytes(
         &mut stdout,
         buf,
-        cli.file_name.as_deref(),
+        None,
         spec.line_range,
-        language_override.as_ref().map(|l| clone_either_lang(l)),
-        line_numbers,
+        language_override.as_ref().map(clone_either_lang),
+        decoration_config,
         use_color,
         squeeze_blank,
         squeeze_limit,
+        cli.show_all,
         &language_set,
         &mut processor,
         &mut renderer,
@@ -340,16 +323,17 @@ fn main() -> Result<()> {
 
     match fs::read(&spec.path) {
       Ok(buf) => {
-        last_ended_with_newline = emit_bytes(
+        emit_bytes(
           &mut stdout,
           buf,
           Some(&spec.path),
           spec.line_range,
-          language_override.as_ref().map(|l| clone_either_lang(l)),
-          line_numbers,
+          language_override.as_ref().map(clone_either_lang),
+          decoration_config,
           use_color,
           squeeze_blank,
           squeeze_limit,
+          cli.show_all,
           &language_set,
           &mut processor,
           &mut renderer,
@@ -391,16 +375,18 @@ fn clone_either_lang(lang: &EitherLang<CustomLang, Lang>) -> EitherLang<CustomLa
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_bytes(
   stdout: &mut impl Write,
   bytes: Vec<u8>,
   path: Option<&Path>,
   line_range: Option<LineRange>,
   language_override: Option<EitherLang<CustomLang, Lang>>,
-  line_numbers: bool,
+  decoration_config: DecorationConfig,
   use_color: bool,
   squeeze_blank: bool,
   squeeze_limit: usize,
+  show_all: bool,
   language_set: &Union<CustomLanguageSet, LanguageSetImpl>,
   processor: &mut Processor<Union<CustomLanguageSet, LanguageSetImpl>>,
   renderer: &mut TerminalRenderer,
@@ -418,10 +404,40 @@ fn emit_bytes(
   };
   let line_number_start = line_range.map(|range| range.start).unwrap_or(1);
   let ended_with_newline = bytes.last() == Some(&b'\n') || bytes.is_empty();
-  if !use_color && !line_numbers {
-    stdout.write_all(&bytes)?;
+
+  // Handle show_all flag for non-color, non-decoration case
+  if !use_color && !decoration_config.has_decorations() {
+    if show_all {
+      if let Ok(text) = String::from_utf8(bytes.clone()) {
+        let transformed = unprintable::show_unprintable(&text, unprintable::get_char_style());
+        stdout.write_all(transformed.as_bytes())?;
+      } else {
+        // Invalid UTF-8, write as-is
+        stdout.write_all(&bytes)?;
+      }
+    } else {
+      stdout.write_all(&bytes)?;
+    }
     return Ok(ended_with_newline);
   }
+
+  // Fetch git changes if needed (only for actual file paths, not stdin)
+  let git_changes = if decoration_config.show_changes {
+    // Only check git for real file paths (not stdin "-")
+    if let Some(p) = path {
+      if p != Path::new("-") {
+        // Convert to absolute path for git detection
+        let abs_path = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        git::get_git_line_changes(&abs_path).unwrap_or_default()
+      } else {
+        Vec::new()
+      }
+    } else {
+      Vec::new()
+    }
+  } else {
+    Vec::new()
+  };
 
   if use_color {
     match String::from_utf8(bytes) {
@@ -430,19 +446,26 @@ fn emit_bytes(
         let rendered = render_text(
           &text,
           language,
-          line_numbers,
+          decoration_config,
           line_number_start,
+          &git_changes,
           processor,
           renderer,
           theme,
+          show_all,
         );
         stdout.write_all(rendered.as_bytes())?;
         return Ok(ended_with_newline);
       }
       Err(err) => {
         let bytes = err.into_bytes();
-        if line_numbers {
+        if decoration_config.show_numbers {
           write_numbered_bytes(stdout, &bytes, line_number_start)?;
+        } else if show_all {
+          // Try to convert what we can, handling invalid UTF-8
+          let text = String::from_utf8_lossy(&bytes);
+          let transformed = unprintable::show_unprintable(&text, unprintable::get_char_style());
+          stdout.write_all(transformed.as_bytes())?;
         } else {
           stdout.write_all(&bytes)?;
         }
@@ -451,7 +474,29 @@ fn emit_bytes(
     }
   }
 
-  write_numbered_bytes(stdout, &bytes, line_number_start)?;
+  if decoration_config.show_numbers {
+    if show_all {
+      // Use number_plain_text when show_all is enabled
+      if let Ok(text) = String::from_utf8(bytes.clone()) {
+        let numbered = number_plain_text(&text, line_number_start, show_all);
+        stdout.write_all(numbered.as_bytes())?;
+      } else {
+        write_numbered_bytes(stdout, &bytes, line_number_start)?;
+      }
+    } else {
+      write_numbered_bytes(stdout, &bytes, line_number_start)?;
+    }
+  } else if show_all {
+    // Handle show_all for non-color case with decorations
+    if let Ok(text) = String::from_utf8(bytes.clone()) {
+      let transformed = unprintable::show_unprintable(&text, unprintable::get_char_style());
+      stdout.write_all(transformed.as_bytes())?;
+    } else {
+      stdout.write_all(&bytes)?;
+    }
+  } else {
+    stdout.write_all(&bytes)?;
+  }
   Ok(ended_with_newline)
 }
 
@@ -499,10 +544,9 @@ fn resolve_language_union(
     .iter()
     .copied()
     .find(|candidate| candidate.eq_ignore_ascii_case(name))
+    && let Ok(lang) = <Lang as SupportedLanguage<'_, _>>::for_name(canonical, language_set)
   {
-    if let Ok(lang) = <Lang as SupportedLanguage<'_, _>>::for_name(canonical, language_set) {
-      return Some(EitherLang::Right(lang));
-    }
+    return Some(EitherLang::Right(lang));
   }
 
   None
@@ -512,20 +556,20 @@ fn detect_language_name(path: Option<&Path>, content: &str) -> Option<&'static s
   let mut extension: Option<String> = None;
   let mut candidates = Vec::new();
 
-  if let Some(path) = path {
-    if let Some(filename) = path.file_name().and_then(|name| name.to_str()) {
-      if let Some(candidate) = detectors::get_language_from_filename(filename) {
-        return Some(candidate);
-      }
+  if let Some(path) = path
+    && let Some(filename) = path.file_name().and_then(|name| name.to_str())
+  {
+    if let Some(candidate) = detectors::get_language_from_filename(filename) {
+      return Some(candidate);
+    }
 
-      extension = detectors::get_extension(filename).map(str::to_string);
-      candidates = extension
-        .as_deref()
-        .map(detectors::get_languages_from_extension)
-        .unwrap_or_else(Vec::new);
-      if candidates.len() == 1 {
-        return Some(candidates[0]);
-      }
+    extension = detectors::get_extension(filename).map(str::to_string);
+    candidates = extension
+      .as_deref()
+      .map(detectors::get_languages_from_extension)
+      .unwrap_or_default();
+    if candidates.len() == 1 {
+      return Some(candidates[0]);
     }
   }
 
@@ -593,18 +637,23 @@ fn truncate_to_char_boundary(s: &str, mut max: usize) -> &str {
   &s[..max]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_text(
   text: &str,
   language: Option<EitherLang<CustomLang, Lang>>,
-  line_numbers: bool,
+  decoration_config: DecorationConfig,
   line_number_start: usize,
+  git_changes: &[Option<git::LineChange>],
   processor: &mut Processor<Union<CustomLanguageSet, LanguageSetImpl>>,
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
+  show_all: bool,
 ) -> String {
   let Some(language) = language else {
-    return if line_numbers {
-      number_plain_text(text, line_number_start)
+    return if decoration_config.show_numbers {
+      number_plain_text(text, line_number_start, show_all)
+    } else if show_all {
+      unprintable::show_unprintable(text, unprintable::get_char_style())
     } else {
       text.to_string()
     };
@@ -612,15 +661,28 @@ fn render_text(
 
   match processor.process(text, language) {
     Ok(highlights) => {
-      if line_numbers {
-        render_highlights_with_numbers(&highlights, renderer, theme, line_number_start)
+      if decoration_config.has_decorations() {
+        render_highlights_with_decorations(
+          &highlights,
+          decoration_config,
+          line_number_start,
+          git_changes,
+          renderer,
+          theme,
+          show_all,
+        )
+      } else if show_all {
+        // Render with show_all transformation applied before terminal escapes
+        render_highlights_show_all(&highlights, renderer, theme)
       } else {
         syntastica::render(&highlights, renderer, theme.clone())
       }
     }
     Err(_) => {
-      if line_numbers {
-        number_plain_text(text, line_number_start)
+      if decoration_config.show_numbers {
+        number_plain_text(text, line_number_start, show_all)
+      } else if show_all {
+        unprintable::show_unprintable(text, unprintable::get_char_style())
       } else {
         text.to_string()
       }
@@ -628,58 +690,103 @@ fn render_text(
   }
 }
 
-fn resolve_theme_with_overrides(
-  theme: &str,
-  theme_light: Option<&str>,
-  theme_dark: Option<&str>,
-) -> ResolvedTheme {
-  let override_name = theme.trim();
-  let theme_key = override_name.split(':').next().unwrap_or("auto");
+/// Render highlights with show_all transformation applied before terminal escape sequences are added.
+/// This ensures we only transform unprintable characters in the source text, not ANSI escape codes.
+fn render_highlights_show_all(
+  highlights: &syntastica::Highlights<'_>,
+  renderer: &mut TerminalRenderer,
+  theme: &ResolvedTheme,
+) -> String {
+  let char_style = unprintable::get_char_style();
+  let mut result = String::new();
+  let last_line = highlights.len().saturating_sub(1);
+
+  // Determine the line feed marker to use
+  let lf_marker = if matches!(char_style, unprintable::CharStyle::Unicode) {
+    "␊"
+  } else {
+    "$"
+  };
+
+  for (index, line) in highlights.iter().enumerate() {
+    let line_has_content = line.iter().any(|(text, _)| !text.is_empty());
+    for (text, style) in line.iter() {
+      // Transform unprintable characters in the text
+      let transformed = unprintable::show_unprintable(text, char_style);
+      // Apply styling if present
+      if let Some(style_name) = style {
+        // Look up the Style from the theme using the style name
+        if let Some(style_obj) = theme.get(*style_name) {
+          result.push_str(&renderer.styled(transformed.as_str(), *style_obj));
+        } else {
+          result.push_str(&transformed);
+        }
+      } else {
+        result.push_str(&transformed);
+      }
+    }
+    // Add line feed marker at the end of each line that has content
+    if line_has_content {
+      result.push_str(lf_marker);
+    }
+    // Add newline between lines, but not after the last line
+    if index != last_line {
+      result.push_str(&renderer.newline());
+    }
+  }
+
+  result
+}
+
+fn resolve_theme(theme: &str) -> ResolvedTheme {
+  let theme_name = theme.trim();
+  let theme_key = theme_name.split(':').next().unwrap_or("auto");
 
   match theme_key {
-    "" | "auto" => resolve_auto_theme(theme_light, theme_dark),
-    "dark" => resolve_named_theme(theme_dark, true),
-    "light" => resolve_named_theme(theme_light, false),
+    "" | "auto" => resolve_auto_theme(),
+    "dark" => syntastica_themes::catppuccin::mocha(),
+    "light" => syntastica_themes::catppuccin::latte(),
     _ => {
       if let Some(theme) = syntastica_themes::from_str(theme_key) {
         return theme;
       }
-      resolve_auto_theme(theme_light, theme_dark)
+      resolve_auto_theme()
     }
   }
 }
 
-fn resolve_named_theme(override_name: Option<&str>, prefer_dark: bool) -> ResolvedTheme {
-  if let Some(name) = override_name {
-    if let Some(theme) = syntastica_themes::from_str(name.trim()) {
-      return theme;
-    }
-  }
-  if prefer_dark {
-    syntastica_themes::catppuccin::mocha()
-  } else {
-    syntastica_themes::catppuccin::latte()
-  }
-}
-
-fn resolve_auto_theme(theme_light: Option<&str>, theme_dark: Option<&str>) -> ResolvedTheme {
+fn resolve_auto_theme() -> ResolvedTheme {
   match dark_light::detect() {
-    Ok(DarkLightMode::Light) => resolve_named_theme(theme_light, false),
-    Ok(DarkLightMode::Dark) => resolve_named_theme(theme_dark, true),
-    Ok(DarkLightMode::Unspecified) => resolve_named_theme(theme_dark, true),
-    Err(_) => resolve_named_theme(theme_dark, true),
+    Ok(DarkLightMode::Light) => syntastica_themes::catppuccin::latte(),
+    Ok(DarkLightMode::Dark) => syntastica_themes::catppuccin::mocha(),
+    Ok(DarkLightMode::Unspecified) => syntastica_themes::catppuccin::mocha(),
+    Err(_) => syntastica_themes::catppuccin::mocha(),
   }
 }
 
-fn render_highlights_with_numbers(
+fn render_highlights_with_decorations(
   highlights: &syntastica::Highlights<'_>,
+  decoration_config: DecorationConfig,
+  line_number_start: usize,
+  git_changes: &[Option<git::LineChange>],
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
-  line_number_start: usize,
+  show_all: bool,
 ) -> String {
   if highlights.is_empty() {
     return String::new();
   }
+
+  // Only show git margin if there are actual changes
+  let has_git_changes = git_changes.iter().any(|c| c.is_some());
+  let effective_config = if has_git_changes {
+    decoration_config
+  } else {
+    DecorationConfig {
+      show_changes: false,
+      ..decoration_config
+    }
+  };
 
   let last_line_no = line_number_start.saturating_add(highlights.len().saturating_sub(1));
   let width = line_number_width(last_line_no);
@@ -688,15 +795,45 @@ fn render_highlights_with_numbers(
 
   for (index, line) in highlights.iter().enumerate() {
     let line_no = line_number_start + index;
-    let prefix = format!("{:>width$}  ", line_no, width = width);
-    let escaped = renderer.escape(&prefix);
-    out += &renderer.unstyled(&escaped);
+    let line_change = git_changes.get(index).copied().flatten();
 
-    for (text, style) in line {
-      let escaped = renderer.escape(text);
-      match style.and_then(|key| theme.find_style(key)) {
-        Some(style) => out += &renderer.styled(&escaped, style),
-        None => out += &renderer.unstyled(&escaped),
+    // Convert highlights to the format expected by the decorations module
+    // Apply unprintable character transformation if show_all is enabled
+    let line_content: Vec<(String, Option<String>)> = line
+      .iter()
+      .map(|(text, style)| {
+        let transformed_text = if show_all {
+          unprintable::show_unprintable(text, unprintable::get_char_style())
+        } else {
+          text.to_string()
+        };
+        (transformed_text, style.map(|s| s.to_string()))
+      })
+      .collect();
+
+    let rendered = decorations::render_decorated_line(
+      &line_content,
+      line_no,
+      &effective_config,
+      line_change,
+      renderer,
+      theme,
+      width,
+    );
+
+    out.push_str(&rendered);
+
+    // Add line feed marker at the end of each line when show_all is enabled
+    // Only add it to lines that have actual content
+    if show_all {
+      let line_has_content = line.iter().any(|(text, _)| !text.is_empty());
+      if line_has_content {
+        let lf_marker = if matches!(unprintable::get_char_style(), unprintable::CharStyle::Unicode) {
+          "␊"
+        } else {
+          "$"
+        };
+        out.push_str(lf_marker);
       }
     }
 
@@ -708,7 +845,7 @@ fn render_highlights_with_numbers(
   out + &renderer.tail()
 }
 
-fn number_plain_text(text: &str, line_number_start: usize) -> String {
+fn number_plain_text(text: &str, line_number_start: usize, show_all: bool) -> String {
   let line_count = count_lines_bytes(text.as_bytes());
   if line_count == 0 {
     return String::new();
@@ -718,9 +855,15 @@ fn number_plain_text(text: &str, line_number_start: usize) -> String {
   let width = line_number_width(last_line_no);
   let mut out = String::new();
   let mut line_no = line_number_start;
+
   for chunk in text.split_inclusive('\n') {
     let _ = write!(out, "{:>width$}  ", line_no, width = width);
-    out.push_str(chunk);
+    let content = if show_all {
+      unprintable::show_unprintable(chunk, unprintable::get_char_style())
+    } else {
+      chunk.to_string()
+    };
+    out.push_str(&content);
     line_no += 1;
   }
   out
@@ -772,38 +915,35 @@ fn line_number_width(line_count: usize) -> usize {
   if width == 0 { 1 } else { width }
 }
 
-fn resolve_line_numbers(cli: &Cli) -> bool {
-  let mut line_numbers = cli.line_numbers;
+fn resolve_decoration_config(cli: &Cli) -> DecorationConfig {
+  let mut config = DecorationConfig::default();
+
+  // Parse style components from --style flag
   if let Some(style) = cli.style.as_deref() {
-    line_numbers = apply_style_line_numbers(line_numbers, style);
+    config = parse_style_components(config, style);
   }
-  if cli.plain > 0 {
-    line_numbers = false;
-  }
-  if cli.line_numbers {
-    line_numbers = true;
-  }
-  line_numbers
+
+  config
 }
 
-fn apply_style_line_numbers(current: bool, style: &str) -> bool {
-  let mut line_numbers = current;
+/// Parse style components from the --style flag.
+/// Supports: "numbers", "changes", "headers"
+fn parse_style_components(mut config: DecorationConfig, style: &str) -> DecorationConfig {
   for raw in style.split(',') {
     let token = raw.trim();
     match token {
-      "plain" | "-numbers" => line_numbers = false,
-      "numbers" | "+numbers" => line_numbers = true,
+      "numbers" => config.show_numbers = true,
+      "changes" => config.show_changes = true,
+      "headers" => config.show_headers = true,
       _ => {}
     }
   }
-  line_numbers
+  config
 }
 
-fn display_name_for_spec(spec: &FileSpec, stdin_name: Option<&Path>) -> String {
+fn display_name_for_spec(spec: &FileSpec) -> String {
   if spec.path == Path::new("-") {
-    stdin_name
-      .map(|path| path.to_string_lossy().to_string())
-      .unwrap_or_else(|| "-".to_string())
+    "-".to_string()
   } else {
     spec.path.to_string_lossy().to_string()
   }

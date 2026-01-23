@@ -6,7 +6,9 @@ A modern replacement for `cat` with syntax highlighting and automatic language d
 
 - **Syntax highlighting** for 100+ languages using tree-sitter parsers
 - **Automatic language detection** based on file extension and content
-- **Line numbers** with `-n` flag
+- **Line numbers** with `-n` flag or `--style=numbers`
+- **Git change indicators** showing added, modified, and removed lines with `--style=changes`
+- **Show unprintable characters** with `-A` / `--show-all` (tabs as →, carriage returns as ↵, etc.) - **unlike bat, syntax highlighting is preserved!**
 - **Theme support** with automatic dark/light mode detection
 - **Stdin support** for piping commands
 - **Fast** - built with Rust and tree-sitter
@@ -56,6 +58,12 @@ Display multiple files:
 scat main.rs lib.rs
 ```
 
+Show unprintable characters (tabs as →, line feeds as ␊):
+
+```bash
+scat -A main.rs
+```
+
 Read from stdin:
 
 ```bash
@@ -70,6 +78,52 @@ Show line numbers with the `-n` or `--line-numbers` flag:
 
 ```bash
 scat -n main.rs
+```
+
+### Decorations (line numbers, git changes)
+
+Control which decorations to display with the `--style` flag:
+
+```bash
+# Show line numbers with grid separator
+scat --style=numbers main.rs
+
+# Show git change indicators (+, ~, -)
+scat --style=changes main.rs
+
+# Combine multiple decorations
+scat --style=numbers,changes main.rs
+```
+
+Git change indicators show:
+- `+` (green) - added lines
+- `~` (yellow) - modified lines
+- `-` (red) - removed lines
+
+### Show unprintable characters
+
+Display tabs, carriage returns, line feeds, and other non-printable characters with `-A` / `--show-all`:
+
+```bash
+scat -A main.rs
+```
+
+This shows:
+- `·` (middle dot) for spaces
+- `→` (right arrow) for tabs
+- `␊` (line feed symbol) at the end of lines
+- `↵` (carriage return symbol) for `\r`
+- `␛` (escape symbol) for escape characters
+- `␀`, `␁`, `␂`, etc. for other control characters
+
+**Unlike `bat -A`**, scat maintains full syntax highlighting while showing unprintable characters!
+
+```bash
+# Combine with line numbers
+scat -A -n main.rs
+
+# Works with git change indicators too
+scat -A --style=changes,numbers main.rs
 ```
 
 ### Language override
@@ -165,6 +219,12 @@ scat --theme nord config.yaml
 
 # View multiple files with line numbers
 scat -n *.rs
+
+# Show unprintable characters (tabs, line feeds, etc.) with syntax highlighting
+scat -A main.rs
+
+# Debug a file with mixed line endings
+scat -A --style=numbers problem_file.txt
 ```
 
 ## Supported Languages
@@ -189,6 +249,7 @@ For a complete list, see the [syntastica-parsers documentation](https://docs.rs/
 ## Why scat?
 
 - **Modern syntax highlighting** using tree-sitter for accurate, grammar-aware highlighting
+- **Show unprintable characters with colors** - unique feature that maintains highlighting while showing tabs, line feeds, and control characters
 - **Smart defaults** with automatic theme and language detection
 - **Familiar interface** - works just like `cat` but with colors
 - **Fast and reliable** - built with Rust for performance and safety
@@ -202,11 +263,14 @@ For a complete list, see the [syntastica-parsers documentation](https://docs.rs/
 | Auto language detection | ✅ | ✅ | ✅ | ✅ |
 | Line numbers | ✅ | ✅ | ❌ | ✅ |
 | Themes | ✅ Many | ✅ Many | ✅ Few | ✅ Many |
-| Git integration | ❌ | ✅ | ❌ | ❌ |
+| Git integration | ✅ | ✅ | ❌ | ❌ |
+| Show unprintable chars | ✅ **with colors** | ✅ *no colors* | ❌ | ❌ |
 | Paging | ❌ | ✅ | ❌ | ❌ |
 | Binary files | ❌ | ✅ | ❌ | ❌ |
 
-`scat` focuses on being a simple, fast `cat` replacement with excellent syntax highlighting. If you need features like git integration or a built-in pager, check out [bat](https://github.com/sharkdp/bat).
+**Key difference:** scat shows unprintable characters (tabs, line feeds, control chars) **while maintaining syntax highlighting** - unlike `bat -A` which disables colors.
+
+`scat` focuses on being a simple, fast `cat` replacement with excellent syntax highlighting and git change indicators. If you need features like a built-in pager or binary file detection, check out [bat](https://github.com/sharkdp/bat).
 
 ## Development
 
