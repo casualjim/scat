@@ -24,10 +24,14 @@ clap_complete = "4"
 clap_mangen = "0.2"
 dark-light = "2"
 eyre = "0.6"
+once_cell = "1.19"
 palate = "0.2"
 syntastica = "0.6.1"
 syntastica-parsers-git = { version = "0.6.1", features = ["all"] }
+syntastica-query-preprocessor = "0.6"
 syntastica-themes = "0.6.1"
+tree-sitter-hcl = "1"
+tree-sitter-language = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "=5.12.0"

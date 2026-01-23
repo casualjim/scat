@@ -1,3 +1,5 @@
+mod custom_langs;
+
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Cursor, IsTerminal, Read, Write};
@@ -8,10 +10,12 @@ use dark_light::Mode as DarkLightMode;
 use eyre::{Result, eyre};
 use palate::detectors;
 use syntastica::Processor;
-use syntastica::language_set::SupportedLanguage;
+use syntastica::language_set::{EitherLang, SupportedLanguage, Union};
 use syntastica::renderer::{Renderer, TerminalRenderer};
 use syntastica::theme::ResolvedTheme;
 use syntastica_parsers_git::{LANGUAGE_NAMES, Lang, LanguageSetImpl};
+
+use custom_langs::{CustomLang, CustomLanguageSet};
 
 const MAX_CONTENT_SIZE_BYTES: usize = 51200;
 
@@ -242,7 +246,10 @@ fn main() -> Result<()> {
     ColorWhen::Never => use_color = false,
     ColorWhen::Always => use_color = true,
   }
-  let language_set = LanguageSetImpl::new();
+  // Use Union to combine custom languages (HCL/Terraform) with syntastica-parsers-git
+  let custom_set = CustomLanguageSet::new();
+  let parser_set = LanguageSetImpl::new();
+  let language_set = Union::new(custom_set, parser_set);
   let theme = resolve_theme_with_overrides(
     &cli.theme,
     cli.theme_light.as_deref(),
@@ -253,7 +260,8 @@ fn main() -> Result<()> {
   let squeeze_blank = cli.squeeze_blank || cli.squeeze_limit.is_some();
   let language_override = match cli.language.as_deref() {
     Some(name) => Some(
-      resolve_language(name, &language_set).ok_or_else(|| eyre!("Unsupported language: {name}"))?,
+      resolve_language_union(name, &language_set)
+        .ok_or_else(|| eyre!("Unsupported language: {name}"))?,
     ),
     None => None,
   };
@@ -316,7 +324,7 @@ fn main() -> Result<()> {
         buf,
         cli.file_name.as_deref(),
         spec.line_range,
-        language_override.as_ref(),
+        language_override.as_ref().map(|l| clone_either_lang(l)),
         line_numbers,
         use_color,
         squeeze_blank,
@@ -337,7 +345,7 @@ fn main() -> Result<()> {
           buf,
           Some(&spec.path),
           spec.line_range,
-          language_override.as_ref(),
+          language_override.as_ref().map(|l| clone_either_lang(l)),
           line_numbers,
           use_color,
           squeeze_blank,
@@ -376,18 +384,25 @@ fn write_man_page() -> Result<()> {
   Ok(())
 }
 
+fn clone_either_lang(lang: &EitherLang<CustomLang, Lang>) -> EitherLang<CustomLang, Lang> {
+  match lang {
+    EitherLang::Left(custom) => EitherLang::Left(*custom),
+    EitherLang::Right(parser) => EitherLang::Right(*parser),
+  }
+}
+
 fn emit_bytes(
   stdout: &mut impl Write,
   bytes: Vec<u8>,
   path: Option<&Path>,
   line_range: Option<LineRange>,
-  language_override: Option<&Lang>,
+  language_override: Option<EitherLang<CustomLang, Lang>>,
   line_numbers: bool,
   use_color: bool,
   squeeze_blank: bool,
   squeeze_limit: usize,
-  language_set: &LanguageSetImpl,
-  processor: &mut Processor<LanguageSetImpl>,
+  language_set: &Union<CustomLanguageSet, LanguageSetImpl>,
+  processor: &mut Processor<Union<CustomLanguageSet, LanguageSetImpl>>,
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
 ) -> Result<bool> {
@@ -411,11 +426,16 @@ fn emit_bytes(
   if use_color {
     match String::from_utf8(bytes) {
       Ok(text) => {
-        let language = language_override
-          .cloned()
-          .or_else(|| detect_language(path, &text, language_set));
-        let rendered =
-          render_text(&text, language, line_numbers, line_number_start, processor, renderer, theme);
+        let language = language_override.or_else(|| detect_language(path, &text, language_set));
+        let rendered = render_text(
+          &text,
+          language,
+          line_numbers,
+          line_number_start,
+          processor,
+          renderer,
+          theme,
+        );
         stdout.write_all(rendered.as_bytes())?;
         return Ok(ended_with_newline);
       }
@@ -438,29 +458,54 @@ fn emit_bytes(
 fn detect_language(
   path: Option<&Path>,
   content: &str,
-  language_set: &LanguageSetImpl,
-) -> Option<Lang> {
+  language_set: &Union<CustomLanguageSet, LanguageSetImpl>,
+) -> Option<EitherLang<CustomLang, Lang>> {
   let name = detect_language_name(path, content)?;
-  resolve_language(name.to_ascii_lowercase(), language_set)
+  resolve_language_union(name.to_ascii_lowercase(), language_set)
 }
 
-fn resolve_language(name: impl AsRef<str>, language_set: &LanguageSetImpl) -> Option<Lang> {
+fn resolve_language_union(
+  name: impl AsRef<str>,
+  language_set: &Union<CustomLanguageSet, LanguageSetImpl>,
+) -> Option<EitherLang<CustomLang, Lang>> {
   let name = name.as_ref().trim();
   let normalized = name.to_ascii_lowercase();
+
+  // First check if it's a custom language (HCL or Terraform)
+  if let Ok(custom_lang) =
+    <CustomLang as SupportedLanguage<'_, _>>::for_name(&normalized, language_set)
+  {
+    return Some(EitherLang::Left(custom_lang));
+  }
+
+  // Then try the syntastica parsers with aliases
   let name = match normalized.as_str() {
     "xml" | "xhtml" | "svg" | "plist" => "html",
     _ => normalized.as_str(),
   };
-  <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_name(name, language_set)
-    .ok()
-    .or_else(|| <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_injection(name, language_set))
-    .or_else(|| {
-      let canonical = LANGUAGE_NAMES
-        .iter()
-        .copied()
-        .find(|candidate| candidate.eq_ignore_ascii_case(name))?;
-      <Lang as SupportedLanguage<'_, LanguageSetImpl>>::for_name(canonical, language_set).ok()
-    })
+
+  // Try as a normal language
+  if let Ok(lang) = <Lang as SupportedLanguage<'_, _>>::for_name(name, language_set) {
+    return Some(EitherLang::Right(lang));
+  }
+
+  // Try as an injection language
+  if let Some(lang) = <Lang as SupportedLanguage<'_, _>>::for_injection(name, language_set) {
+    return Some(EitherLang::Right(lang));
+  }
+
+  // Try with canonical names
+  if let Some(canonical) = LANGUAGE_NAMES
+    .iter()
+    .copied()
+    .find(|candidate| candidate.eq_ignore_ascii_case(name))
+  {
+    if let Ok(lang) = <Lang as SupportedLanguage<'_, _>>::for_name(canonical, language_set) {
+      return Some(EitherLang::Right(lang));
+    }
+  }
+
+  None
 }
 
 fn detect_language_name(path: Option<&Path>, content: &str) -> Option<&'static str> {
@@ -550,10 +595,10 @@ fn truncate_to_char_boundary(s: &str, mut max: usize) -> &str {
 
 fn render_text(
   text: &str,
-  language: Option<Lang>,
+  language: Option<EitherLang<CustomLang, Lang>>,
   line_numbers: bool,
   line_number_start: usize,
-  processor: &mut Processor<LanguageSetImpl>,
+  processor: &mut Processor<Union<CustomLanguageSet, LanguageSetImpl>>,
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
 ) -> String {
@@ -681,7 +726,11 @@ fn number_plain_text(text: &str, line_number_start: usize) -> String {
   out
 }
 
-fn write_numbered_bytes(stdout: &mut impl Write, bytes: &[u8], line_number_start: usize) -> Result<()> {
+fn write_numbered_bytes(
+  stdout: &mut impl Write,
+  bytes: &[u8],
+  line_number_start: usize,
+) -> Result<()> {
   let line_count = count_lines_bytes(bytes);
   if line_count == 0 {
     return Ok(());
@@ -848,7 +897,10 @@ fn parse_line_range_arg(raw: &str) -> Result<LineRange> {
 
 fn parse_line_range(raw: &str) -> Option<LineRange> {
   let raw = raw.trim();
-  let raw = raw.strip_prefix('L').or_else(|| raw.strip_prefix('l')).unwrap_or(raw);
+  let raw = raw
+    .strip_prefix('L')
+    .or_else(|| raw.strip_prefix('l'))
+    .unwrap_or(raw);
   if raw.is_empty() {
     return None;
   }
@@ -871,7 +923,10 @@ fn parse_line_range(raw: &str) -> Option<LineRange> {
   let start_raw = start_raw.trim();
   let end_raw = end_raw.trim();
   let start = start_raw.parse::<usize>().ok()?;
-  let end_raw = end_raw.strip_prefix('L').or_else(|| end_raw.strip_prefix('l')).unwrap_or(end_raw);
+  let end_raw = end_raw
+    .strip_prefix('L')
+    .or_else(|| end_raw.strip_prefix('l'))
+    .unwrap_or(end_raw);
   let end = end_raw.parse::<usize>().ok()?;
   if start == 0 || end == 0 || end < start {
     return None;

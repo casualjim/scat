@@ -1215,6 +1215,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lua-pattern"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab84ba33842e323474cc2e32179407782b6dd272eeb433c47e5cd11912163cf0"
+dependencies = [
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1773,6 +1782,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88f8660c1ff60292143c98d08fc6e2f654d722db50410e3f3797d40baaf9d8f3"
 
 [[package]]
+name = "rsexpr"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9303222e60c80bc82f0f9cfeb3262851618d54066fd6cd86730275f842497be5"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1821,10 +1839,14 @@ dependencies = [
  "clap_mangen",
  "dark-light",
  "eyre",
+ "once_cell",
  "palate",
  "syntastica",
  "syntastica-parsers-git",
+ "syntastica-query-preprocessor",
  "syntastica-themes",
+ "tree-sitter-hcl",
+ "tree-sitter-language",
  "zbus",
  "zvariant",
 ]
@@ -2133,7 +2155,7 @@ dependencies = [
  "aho-corasick",
  "syntastica-core",
  "syntastica-highlight",
- "thiserror",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -2145,7 +2167,7 @@ dependencies = [
  "palette",
  "syntastica-highlight",
  "tft",
- "thiserror",
+ "thiserror 2.0.17",
  "tree-sitter",
 ]
 
@@ -2157,7 +2179,7 @@ checksum = "47d2d7e8224fd9620bf0049e58f53859ca6435822ec1705ff5bc505b106fc33f"
 dependencies = [
  "regex",
  "streaming-iterator",
- "thiserror",
+ "thiserror 2.0.17",
  "tree-sitter",
 ]
 
@@ -2198,6 +2220,17 @@ name = "syntastica-queries"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a39185b86d0392cc01484934e2e6dfad5126e953aa2b9bff4dacc703d7b018fb"
+
+[[package]]
+name = "syntastica-query-preprocessor"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9361bdff7e317c689a92bc9506bae8b61cfe4e1c030bda10703c194669942de8"
+dependencies = [
+ "lazy-regex",
+ "lua-pattern",
+ "rsexpr",
+]
 
 [[package]]
 name = "syntastica-themes"
@@ -2258,11 +2291,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.17",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
 ]
 
 [[package]]
@@ -2457,10 +2510,20 @@ dependencies = [
  "serde",
  "serde_json",
  "smallbitvec",
- "thiserror",
+ "thiserror 2.0.17",
  "topological-sort",
  "tree-sitter",
  "url",
+]
+
+[[package]]
+name = "tree-sitter-hcl"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a7b2cc3d7121553b84309fab9d11b3ff3d420403eef9ae50f9fd1cd9d9cf012"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
