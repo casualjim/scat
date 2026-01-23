@@ -6,7 +6,8 @@ A modern replacement for `cat` with syntax highlighting and automatic language d
 
 - **Syntax highlighting** for 100+ languages using tree-sitter parsers
 - **Automatic language detection** based on file extension and content
-- **Line numbers** with `-n` flag
+- **Line numbers** with `-n` flag or `--style=numbers`
+- **Git change indicators** showing added, modified, and removed lines with `--style=changes`
 - **Theme support** with automatic dark/light mode detection
 - **Stdin support** for piping commands
 - **Fast** - built with Rust and tree-sitter
@@ -71,6 +72,26 @@ Show line numbers with the `-n` or `--line-numbers` flag:
 ```bash
 scat -n main.rs
 ```
+
+### Decorations (line numbers, git changes)
+
+Control which decorations to display with the `--style` flag:
+
+```bash
+# Show line numbers with grid separator
+scat --style=numbers main.rs
+
+# Show git change indicators (+, ~, -)
+scat --style=changes main.rs
+
+# Combine multiple decorations
+scat --style=numbers,changes main.rs
+```
+
+Git change indicators show:
+- `+` (green) - added lines
+- `~` (yellow) - modified lines
+- `-` (red) - removed lines
 
 ### Language override
 
@@ -202,11 +223,11 @@ For a complete list, see the [syntastica-parsers documentation](https://docs.rs/
 | Auto language detection | ✅ | ✅ | ✅ | ✅ |
 | Line numbers | ✅ | ✅ | ❌ | ✅ |
 | Themes | ✅ Many | ✅ Many | ✅ Few | ✅ Many |
-| Git integration | ❌ | ✅ | ❌ | ❌ |
+| Git integration | ✅ | ✅ | ❌ | ❌ |
 | Paging | ❌ | ✅ | ❌ | ❌ |
 | Binary files | ❌ | ✅ | ❌ | ❌ |
 
-`scat` focuses on being a simple, fast `cat` replacement with excellent syntax highlighting. If you need features like git integration or a built-in pager, check out [bat](https://github.com/sharkdp/bat).
+`scat` focuses on being a simple, fast `cat` replacement with excellent syntax highlighting and git change indicators. If you need features like a built-in pager or binary file detection, check out [bat](https://github.com/sharkdp/bat).
 
 ## Development
 
