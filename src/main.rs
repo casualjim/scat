@@ -3,6 +3,8 @@ mod decorations;
 mod git;
 mod unprintable;
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Cursor, IsTerminal, Read, Write};
@@ -13,15 +15,17 @@ use dark_light::Mode as DarkLightMode;
 use decorations::DecorationConfig;
 use eyre::{Result, eyre};
 use palate::detectors;
-use syntastica::Processor;
-use syntastica::language_set::{EitherLang, SupportedLanguage, Union};
+use syntastica::language_set::{EitherLang, LanguageSet, SupportedLanguage, Union};
 use syntastica::renderer::{Renderer, TerminalRenderer};
-use syntastica::theme::ResolvedTheme;
+use syntastica::theme::{ResolvedTheme, THEME_KEYS};
+use syntastica_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 use syntastica_parsers_git::{LANGUAGE_NAMES, Lang, LanguageSetImpl};
 
 use custom_langs::{CustomLang, CustomLanguageSet};
 
 const MAX_CONTENT_SIZE_BYTES: usize = 51200;
+const STREAM_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
+const STREAM_OUTPUT_FLUSH_BYTES: usize = 8 * 1024;
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum ColorWhen {
@@ -40,7 +44,7 @@ enum ColorWhen {
                 Supports 100+ programming languages and multiple color themes.",
   after_help = "EXAMPLES:\n    \
     scat main.rs                    Display a file with syntax highlighting\n    \
-    scat -n config.toml             Show file with line numbers\n    \
+    scat --style=numbers config.toml  Show file with line numbers\n    \
     scat main.rs#L10-L20            Show only selected lines\n    \
     scat --language rust file.txt   Force Rust syntax highlighting\n    \
     scat --theme dracula main.js    Use Dracula color theme\n    \
@@ -146,7 +150,7 @@ struct Cli {
   #[arg(
     long,
     value_name = "components",
-    help = "Configure which style components to display (numbers, changes)"
+    help = "Style components (numbers, changes, headers, rich)"
   )]
   style: Option<String>,
 
@@ -197,6 +201,96 @@ struct FileSpec {
   line_range: Option<LineRange>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct StyleConfig {
+  decoration_config: DecorationConfig,
+  highlight_locals: bool,
+  highlight_injections: bool,
+}
+
+struct RenderContext<'a> {
+  decoration_config: DecorationConfig,
+  highlight_locals: bool,
+  highlight_injections: bool,
+  use_color: bool,
+  squeeze_blank: bool,
+  squeeze_limit: usize,
+  show_all: bool,
+  language_set: &'a Union<CustomLanguageSet, LanguageSetImpl>,
+  theme: &'a ResolvedTheme,
+}
+
+struct RenderState {
+  highlighter: Highlighter,
+  highlights_only_configs: HashMap<Lang, HighlightConfiguration>,
+  locals_configs: HashMap<Lang, HighlightConfiguration>,
+  renderer: TerminalRenderer,
+}
+
+impl RenderState {
+  fn new() -> Self {
+    Self {
+      highlighter: Highlighter::new(),
+      highlights_only_configs: HashMap::new(),
+      locals_configs: HashMap::new(),
+      renderer: TerminalRenderer::new(None),
+    }
+  }
+}
+
+struct DecorationsStreamSettings<'a> {
+  decoration_config: DecorationConfig,
+  line_number_start: usize,
+  git_changes: &'a [Option<git::LineChange>],
+  theme: &'a ResolvedTheme,
+  show_all: bool,
+}
+
+struct StreamBuffer<'a, W> {
+  out: &'a mut W,
+  buf: String,
+}
+
+impl<'a, W: Write> StreamBuffer<'a, W> {
+  fn new(out: &'a mut W) -> Self {
+    Self {
+      out,
+      buf: String::with_capacity(STREAM_OUTPUT_BUFFER_BYTES),
+    }
+  }
+
+  fn len(&self) -> usize {
+    self.buf.len()
+  }
+
+  fn push(&mut self, s: &str) -> std::result::Result<(), StreamHighlightError> {
+    self.buf.push_str(s);
+    self.flush_if_full()
+  }
+
+  fn flush_if_at_least(&mut self, bytes: usize) -> std::result::Result<(), StreamHighlightError> {
+    if self.buf.len() >= bytes {
+      self.flush()?;
+    }
+    Ok(())
+  }
+
+  fn flush_if_full(&mut self) -> std::result::Result<(), StreamHighlightError> {
+    if self.buf.len() >= STREAM_OUTPUT_BUFFER_BYTES {
+      self.flush()?;
+    }
+    Ok(())
+  }
+
+  fn flush(&mut self) -> std::result::Result<(), StreamHighlightError> {
+    if !self.buf.is_empty() {
+      self.out.write_all(self.buf.as_bytes())?;
+      self.buf.clear();
+    }
+    Ok(())
+  }
+}
+
 fn main() -> Result<()> {
   let cli = Cli::parse();
   if let Some(shell) = cli.completions {
@@ -228,7 +322,10 @@ fn main() -> Result<()> {
   let parser_set = LanguageSetImpl::new();
   let language_set = Union::new(custom_set, parser_set);
   let theme = resolve_theme(&cli.theme);
-  let decoration_config = resolve_decoration_config(&cli);
+  let style_config = parse_style_components(cli.style.as_deref());
+  let decoration_config = style_config.decoration_config;
+  let highlight_locals = style_config.highlight_locals;
+  let highlight_injections = style_config.highlight_injections;
   let squeeze_limit = cli.squeeze_limit.unwrap_or(1);
   let squeeze_blank = cli.squeeze_blank || cli.squeeze_limit.is_some();
   let language_override = match cli.language.as_deref() {
@@ -262,8 +359,18 @@ fn main() -> Result<()> {
     }
   }
 
-  let mut processor = Processor::new(&language_set);
-  let mut renderer = TerminalRenderer::new(None);
+  let ctx = RenderContext {
+    decoration_config,
+    highlight_locals,
+    highlight_injections,
+    use_color,
+    squeeze_blank,
+    squeeze_limit,
+    show_all: cli.show_all,
+    language_set: &language_set,
+    theme: &theme,
+  };
+  let mut state = RenderState::new();
   let mut stdout = io::stdout().lock();
   let mut stdin = io::stdin();
   let mut stdin_consumed = false;
@@ -272,7 +379,7 @@ fn main() -> Result<()> {
 
   for spec in file_specs {
     // Show file header between files when headers are enabled
-    if decoration_config.show_headers && multiple_files {
+    if ctx.decoration_config.show_headers && multiple_files {
       if wrote_output {
         writeln!(stdout)?;
       }
@@ -286,7 +393,13 @@ fn main() -> Result<()> {
       writeln!(stdout, "{border}")?;
       // Center the filename in the header
       let padding = (term_width.saturating_sub(display_name.len())) / 2;
-      writeln!(stdout, "{}{}{}", " ".repeat(padding), display_name, " ".repeat(term_width - display_name.len() - padding))?;
+      writeln!(
+        stdout,
+        "{}{}{}",
+        " ".repeat(padding),
+        display_name,
+        " ".repeat(term_width - display_name.len() - padding)
+      )?;
       writeln!(stdout, "{border}")?;
     }
 
@@ -307,15 +420,8 @@ fn main() -> Result<()> {
         None,
         spec.line_range,
         language_override.as_ref().map(clone_either_lang),
-        decoration_config,
-        use_color,
-        squeeze_blank,
-        squeeze_limit,
-        cli.show_all,
-        &language_set,
-        &mut processor,
-        &mut renderer,
-        &theme,
+        &ctx,
+        &mut state,
       )?;
       wrote_output = true;
       continue;
@@ -329,15 +435,8 @@ fn main() -> Result<()> {
           Some(&spec.path),
           spec.line_range,
           language_override.as_ref().map(clone_either_lang),
-          decoration_config,
-          use_color,
-          squeeze_blank,
-          squeeze_limit,
-          cli.show_all,
-          &language_set,
-          &mut processor,
-          &mut renderer,
-          &theme,
+          &ctx,
+          &mut state,
         )?;
         wrote_output = true;
       }
@@ -375,35 +474,30 @@ fn clone_either_lang(lang: &EitherLang<CustomLang, Lang>) -> EitherLang<CustomLa
   }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_bytes(
   stdout: &mut impl Write,
   bytes: Vec<u8>,
   path: Option<&Path>,
   line_range: Option<LineRange>,
   language_override: Option<EitherLang<CustomLang, Lang>>,
-  decoration_config: DecorationConfig,
-  use_color: bool,
-  squeeze_blank: bool,
-  squeeze_limit: usize,
-  show_all: bool,
-  language_set: &Union<CustomLanguageSet, LanguageSetImpl>,
-  processor: &mut Processor<Union<CustomLanguageSet, LanguageSetImpl>>,
-  renderer: &mut TerminalRenderer,
-  theme: &ResolvedTheme,
+  ctx: &RenderContext<'_>,
+  state: &mut RenderState,
 ) -> Result<bool> {
   let bytes = if let Some(range) = line_range {
     slice_bytes_by_line_range(&bytes, range)
   } else {
     bytes
   };
-  let bytes = if squeeze_blank {
-    squeeze_blank_lines_bytes(&bytes, squeeze_limit)
+  let bytes = if ctx.squeeze_blank {
+    squeeze_blank_lines_bytes(&bytes, ctx.squeeze_limit)
   } else {
     bytes
   };
   let line_number_start = line_range.map(|range| range.start).unwrap_or(1);
   let ended_with_newline = bytes.last() == Some(&b'\n') || bytes.is_empty();
+  let decoration_config = ctx.decoration_config;
+  let show_all = ctx.show_all;
+  let use_color = ctx.use_color;
 
   // Handle show_all flag for non-color, non-decoration case
   if !use_color && !decoration_config.has_decorations() {
@@ -442,19 +536,16 @@ fn emit_bytes(
   if use_color {
     match String::from_utf8(bytes) {
       Ok(text) => {
-        let language = language_override.or_else(|| detect_language(path, &text, language_set));
-        let rendered = render_text(
+        let language = language_override.or_else(|| detect_language(path, &text, ctx.language_set));
+        write_rendered_text(
+          stdout,
           &text,
           language,
-          decoration_config,
           line_number_start,
           &git_changes,
-          processor,
-          renderer,
-          theme,
-          show_all,
-        );
-        stdout.write_all(rendered.as_bytes())?;
+          ctx,
+          state,
+        )?;
         return Ok(ended_with_newline);
       }
       Err(err) => {
@@ -637,105 +728,429 @@ fn truncate_to_char_boundary(s: &str, mut max: usize) -> &str {
   &s[..max]
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_text(
+#[derive(Debug)]
+enum StreamHighlightError {
+  Highlight,
+  Io(io::Error),
+}
+
+impl From<io::Error> for StreamHighlightError {
+  fn from(value: io::Error) -> Self {
+    Self::Io(value)
+  }
+}
+
+fn write_rendered_text(
+  stdout: &mut impl Write,
   text: &str,
   language: Option<EitherLang<CustomLang, Lang>>,
-  decoration_config: DecorationConfig,
   line_number_start: usize,
   git_changes: &[Option<git::LineChange>],
-  processor: &mut Processor<Union<CustomLanguageSet, LanguageSetImpl>>,
-  renderer: &mut TerminalRenderer,
-  theme: &ResolvedTheme,
-  show_all: bool,
-) -> String {
+  ctx: &RenderContext<'_>,
+  state: &mut RenderState,
+) -> Result<()> {
+  let decoration_config = ctx.decoration_config;
+  let show_all = ctx.show_all;
+
   let Some(language) = language else {
-    return if decoration_config.show_numbers {
+    let out = if decoration_config.show_numbers {
       number_plain_text(text, line_number_start, show_all)
     } else if show_all {
       unprintable::show_unprintable(text, unprintable::get_char_style())
     } else {
       text.to_string()
     };
+    stdout.write_all(out.as_bytes())?;
+    return Ok(());
   };
 
-  match processor.process(text, language) {
-    Ok(highlights) => {
-      if decoration_config.has_decorations() {
-        render_highlights_with_decorations(
-          &highlights,
-          decoration_config,
-          line_number_start,
-          git_changes,
-          renderer,
-          theme,
-          show_all,
-        )
-      } else if show_all {
-        // Render with show_all transformation applied before terminal escapes
-        render_highlights_show_all(&highlights, renderer, theme)
-      } else {
-        syntastica::render(&highlights, renderer, theme.clone())
-      }
-    }
-    Err(_) => {
-      if decoration_config.show_numbers {
+  match write_highlighted_text_stream(
+    stdout,
+    text,
+    language,
+    line_number_start,
+    git_changes,
+    ctx,
+    state,
+  ) {
+    Ok(()) => Ok(()),
+    Err(StreamHighlightError::Highlight) => {
+      let out = if decoration_config.show_numbers {
         number_plain_text(text, line_number_start, show_all)
       } else if show_all {
         unprintable::show_unprintable(text, unprintable::get_char_style())
       } else {
         text.to_string()
+      };
+      stdout.write_all(out.as_bytes())?;
+      Ok(())
+    }
+    Err(StreamHighlightError::Io(err)) => Err(err.into()),
+  }
+}
+
+fn write_highlighted_text_stream(
+  stdout: &mut impl Write,
+  text: &str,
+  language: EitherLang<CustomLang, Lang>,
+  line_number_start: usize,
+  git_changes: &[Option<git::LineChange>],
+  ctx: &RenderContext<'_>,
+  state: &mut RenderState,
+) -> std::result::Result<(), StreamHighlightError> {
+  let language_set = ctx.language_set;
+  let decoration_config = ctx.decoration_config;
+  let theme = ctx.theme;
+  let show_all = ctx.show_all;
+  let highlight_locals = ctx.highlight_locals;
+  let highlight_injections = ctx.highlight_injections;
+
+  let highlight_config = if highlight_injections {
+    language_set
+      .get_language(language)
+      .map_err(|_| StreamHighlightError::Highlight)?
+  } else if highlight_locals {
+    match language {
+      EitherLang::Right(lang) => get_locals_config(&mut state.locals_configs, lang)?,
+      EitherLang::Left(custom) => language_set
+        .get_language(EitherLang::Left(custom))
+        .map_err(|_| StreamHighlightError::Highlight)?,
+    }
+  } else {
+    match language {
+      EitherLang::Right(lang) => {
+        get_highlights_only_config(&mut state.highlights_only_configs, lang)?
       }
+      EitherLang::Left(custom) => language_set
+        .get_language(EitherLang::Left(custom))
+        .map_err(|_| StreamHighlightError::Highlight)?,
+    }
+  };
+
+  let iter = state
+    .highlighter
+    .highlight(
+      highlight_config,
+      text.as_bytes(),
+      None,
+      |lang_name: &str| {
+        if !highlight_injections {
+          return None;
+        }
+
+        let lang_name = lang_name.to_ascii_lowercase();
+        EitherLang::<CustomLang, Lang>::for_name(&lang_name, language_set)
+          .ok()
+          .or_else(|| EitherLang::<CustomLang, Lang>::for_injection(&lang_name, language_set))
+          .or_else(|| {
+            lang_name.rsplit_once('/').and_then(|(_, name)| {
+              EitherLang::<CustomLang, Lang>::for_name(name, language_set)
+                .ok()
+                .or_else(|| EitherLang::<CustomLang, Lang>::for_injection(name, language_set))
+            })
+          })
+          .and_then(|lang| language_set.get_language(lang).ok())
+      },
+    )
+    .map_err(|_| StreamHighlightError::Highlight)?;
+
+  if decoration_config.has_decorations() {
+    write_highlight_iter_with_decorations(
+      stdout,
+      text,
+      iter,
+      &mut state.renderer,
+      DecorationsStreamSettings {
+        decoration_config,
+        line_number_start,
+        git_changes,
+        theme,
+        show_all,
+      },
+    )
+  } else {
+    write_highlight_iter_plain(stdout, text, iter, &mut state.renderer, theme, show_all)
+  }
+}
+
+fn current_style_key(style_stack: &[usize]) -> Option<&'static str> {
+  style_stack
+    .last()
+    .and_then(|idx| THEME_KEYS.get(*idx).copied())
+    .and_then(|key| (key != "none").then_some(key))
+}
+
+fn get_highlights_only_config(
+  configs: &mut HashMap<Lang, HighlightConfiguration>,
+  lang: Lang,
+) -> std::result::Result<&HighlightConfiguration, StreamHighlightError> {
+  use std::collections::hash_map::Entry;
+
+  match configs.entry(lang) {
+    Entry::Occupied(entry) => Ok(entry.into_mut()),
+    Entry::Vacant(entry) => {
+      let mut conf =
+        HighlightConfiguration::new(lang.get(), lang.as_ref(), lang.highlights_query(), "", "")
+          .map_err(|_| StreamHighlightError::Highlight)?;
+      conf.configure(THEME_KEYS);
+      Ok(entry.insert(conf))
     }
   }
 }
 
-/// Render highlights with show_all transformation applied before terminal escape sequences are added.
-/// This ensures we only transform unprintable characters in the source text, not ANSI escape codes.
-fn render_highlights_show_all(
-  highlights: &syntastica::Highlights<'_>,
+fn get_locals_config(
+  configs: &mut HashMap<Lang, HighlightConfiguration>,
+  lang: Lang,
+) -> std::result::Result<&HighlightConfiguration, StreamHighlightError> {
+  use std::collections::hash_map::Entry;
+
+  match configs.entry(lang) {
+    Entry::Occupied(entry) => Ok(entry.into_mut()),
+    Entry::Vacant(entry) => {
+      let mut conf = HighlightConfiguration::new(
+        lang.get(),
+        lang.as_ref(),
+        lang.highlights_query(),
+        "",
+        lang.locals_query(),
+      )
+      .map_err(|_| StreamHighlightError::Highlight)?;
+      conf.configure(THEME_KEYS);
+      Ok(entry.insert(conf))
+    }
+  }
+}
+
+fn highlight_line_count(text: &str) -> usize {
+  text
+    .as_bytes()
+    .iter()
+    .filter(|byte| **byte == b'\n')
+    .count()
+    .saturating_add(1)
+}
+
+fn write_highlight_iter_plain(
+  stdout: &mut impl Write,
+  text: &str,
+  iter: impl Iterator<Item = std::result::Result<HighlightEvent, syntastica_highlight::Error>>,
   renderer: &mut TerminalRenderer,
   theme: &ResolvedTheme,
-) -> String {
-  let char_style = unprintable::get_char_style();
-  let mut result = String::new();
-  let last_line = highlights.len().saturating_sub(1);
+  show_all: bool,
+) -> std::result::Result<(), StreamHighlightError> {
+  let mut out = StreamBuffer::new(stdout);
+  out.push(renderer.head().as_ref())?;
+  out.flush()?;
 
-  // Determine the line feed marker to use
+  let char_style = unprintable::get_char_style();
   let lf_marker = if matches!(char_style, unprintable::CharStyle::Unicode) {
     "␊"
   } else {
     "$"
   };
 
-  for (index, line) in highlights.iter().enumerate() {
-    let line_has_content = line.iter().any(|(text, _)| !text.is_empty());
-    for (text, style) in line.iter() {
-      // Transform unprintable characters in the text
-      let transformed = unprintable::show_unprintable(text, char_style);
-      // Apply styling if present
-      if let Some(style_name) = style {
-        // Look up the Style from the theme using the style name
-        if let Some(style_obj) = theme.get(*style_name) {
-          result.push_str(&renderer.styled(transformed.as_str(), *style_obj));
-        } else {
-          result.push_str(&transformed);
-        }
-      } else {
-        result.push_str(&transformed);
+  let mut style_stack = Vec::new();
+  let mut line_has_content = false;
+  let mut flushed_visible_output = false;
+
+  for event in iter {
+    let event = event.map_err(|_| StreamHighlightError::Highlight)?;
+    match event {
+      HighlightEvent::HighlightStart(Highlight(highlight)) => style_stack.push(highlight),
+      HighlightEvent::HighlightEnd => {
+        style_stack.pop();
       }
-    }
-    // Add line feed marker at the end of each line that has content
-    if line_has_content {
-      result.push_str(lf_marker);
-    }
-    // Add newline between lines, but not after the last line
-    if index != last_line {
-      result.push_str(&renderer.newline());
+      HighlightEvent::Source { start, end } => {
+        let source = &text[start..end];
+        let ends_with_newline = source.ends_with('\n');
+        let mut lines = source.lines().peekable();
+
+        while let Some(line) = lines.next() {
+          if !line.is_empty() {
+            line_has_content = true;
+          }
+
+          let style_key = current_style_key(&style_stack);
+
+          if show_all {
+            let transformed = unprintable::show_unprintable(line, char_style);
+            if let Some(key) = style_key
+              && let Some(style_obj) = theme.get(key)
+            {
+              let rendered = renderer.styled(transformed.as_str(), *style_obj);
+              out.push(rendered.as_ref())?;
+            } else {
+              out.push(&transformed)?;
+            }
+          } else {
+            let escaped = renderer.escape(line);
+            let rendered = match style_key.and_then(|key| theme.find_style(key)) {
+              Some(style) => renderer.styled(&escaped, style),
+              None => renderer.unstyled(&escaped),
+            };
+            out.push(rendered.as_ref())?;
+          }
+
+          if !flushed_visible_output && out.len() >= STREAM_OUTPUT_FLUSH_BYTES {
+            out.flush()?;
+            flushed_visible_output = true;
+          }
+
+          let newline_after = lines.peek().is_some() || ends_with_newline;
+          if newline_after {
+            if show_all && line_has_content {
+              out.push(lf_marker)?;
+            }
+            out.push(renderer.newline().as_ref())?;
+            if !flushed_visible_output {
+              out.flush()?;
+              flushed_visible_output = true;
+            } else {
+              out.flush_if_at_least(STREAM_OUTPUT_FLUSH_BYTES)?;
+            }
+            line_has_content = false;
+          }
+        }
+      }
     }
   }
 
-  result
+  if show_all && line_has_content {
+    out.push(lf_marker)?;
+  }
+
+  out.push(renderer.tail().as_ref())?;
+  out.flush()?;
+  Ok(())
+}
+
+fn write_highlight_iter_with_decorations(
+  stdout: &mut impl Write,
+  text: &str,
+  iter: impl Iterator<Item = std::result::Result<HighlightEvent, syntastica_highlight::Error>>,
+  renderer: &mut TerminalRenderer,
+  settings: DecorationsStreamSettings<'_>,
+) -> std::result::Result<(), StreamHighlightError> {
+  let decoration_config = settings.decoration_config;
+  let line_number_start = settings.line_number_start;
+  let git_changes = settings.git_changes;
+  let theme = settings.theme;
+  let show_all = settings.show_all;
+
+  // Only show git margin if there are actual changes
+  let has_git_changes = git_changes.iter().any(|c| c.is_some());
+  let effective_config = if has_git_changes {
+    decoration_config
+  } else {
+    DecorationConfig {
+      show_changes: false,
+      ..decoration_config
+    }
+  };
+
+  // Match Processor output: number of highlight lines is newlines + 1.
+  let line_count = highlight_line_count(text);
+  let last_line_no = line_number_start.saturating_add(line_count.saturating_sub(1));
+  let width = line_number_width(last_line_no);
+
+  let mut out = StreamBuffer::new(stdout);
+  out.push(renderer.head().as_ref())?;
+  out.flush()?;
+
+  let char_style = unprintable::get_char_style();
+  let lf_marker = if matches!(char_style, unprintable::CharStyle::Unicode) {
+    "␊"
+  } else {
+    "$"
+  };
+
+  let mut style_stack = Vec::new();
+  let mut line_no = line_number_start;
+  let mut line_index = 0usize;
+  let mut line_has_content = false;
+  let mut line_content: Vec<(Cow<'_, str>, Option<&'static str>)> = Vec::new();
+  let mut flushed_visible_output = false;
+
+  for event in iter {
+    let event = event.map_err(|_| StreamHighlightError::Highlight)?;
+    match event {
+      HighlightEvent::HighlightStart(Highlight(highlight)) => style_stack.push(highlight),
+      HighlightEvent::HighlightEnd => {
+        style_stack.pop();
+      }
+      HighlightEvent::Source { start, end } => {
+        let source = &text[start..end];
+        let ends_with_newline = source.ends_with('\n');
+        let mut lines = source.lines().peekable();
+
+        while let Some(line) = lines.next() {
+          if !line.is_empty() {
+            line_has_content = true;
+          }
+
+          let style_key = current_style_key(&style_stack);
+          let piece = if show_all {
+            Cow::Owned(unprintable::show_unprintable(line, char_style))
+          } else {
+            Cow::Borrowed(line)
+          };
+          line_content.push((piece, style_key));
+
+          let newline_after = lines.peek().is_some() || ends_with_newline;
+          if newline_after {
+            let line_change = git_changes.get(line_index).copied().flatten();
+            let rendered = decorations::render_decorated_line(
+              &line_content,
+              line_no,
+              &effective_config,
+              line_change,
+              renderer,
+              theme,
+              width,
+            );
+            out.push(&rendered)?;
+
+            if show_all && line_has_content {
+              out.push(lf_marker)?;
+            }
+
+            out.push(renderer.newline().as_ref())?;
+            if !flushed_visible_output {
+              out.flush()?;
+              flushed_visible_output = true;
+            } else {
+              out.flush_if_at_least(STREAM_OUTPUT_FLUSH_BYTES)?;
+            }
+
+            line_content.clear();
+            line_has_content = false;
+            line_no += 1;
+            line_index += 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Flush final line (even if empty) to match existing decoration behavior.
+  let line_change = git_changes.get(line_index).copied().flatten();
+  let rendered = decorations::render_decorated_line(
+    &line_content,
+    line_no,
+    &effective_config,
+    line_change,
+    renderer,
+    theme,
+    width,
+  );
+  out.push(&rendered)?;
+  if show_all && line_has_content {
+    out.push(lf_marker)?;
+  }
+
+  out.push(renderer.tail().as_ref())?;
+  out.flush()?;
+  Ok(())
 }
 
 fn resolve_theme(theme: &str) -> ResolvedTheme {
@@ -762,87 +1177,6 @@ fn resolve_auto_theme() -> ResolvedTheme {
     Ok(DarkLightMode::Unspecified) => syntastica_themes::catppuccin::mocha(),
     Err(_) => syntastica_themes::catppuccin::mocha(),
   }
-}
-
-fn render_highlights_with_decorations(
-  highlights: &syntastica::Highlights<'_>,
-  decoration_config: DecorationConfig,
-  line_number_start: usize,
-  git_changes: &[Option<git::LineChange>],
-  renderer: &mut TerminalRenderer,
-  theme: &ResolvedTheme,
-  show_all: bool,
-) -> String {
-  if highlights.is_empty() {
-    return String::new();
-  }
-
-  // Only show git margin if there are actual changes
-  let has_git_changes = git_changes.iter().any(|c| c.is_some());
-  let effective_config = if has_git_changes {
-    decoration_config
-  } else {
-    DecorationConfig {
-      show_changes: false,
-      ..decoration_config
-    }
-  };
-
-  let last_line_no = line_number_start.saturating_add(highlights.len().saturating_sub(1));
-  let width = line_number_width(last_line_no);
-  let last_line = highlights.len().saturating_sub(1);
-  let mut out = renderer.head().into_owned();
-
-  for (index, line) in highlights.iter().enumerate() {
-    let line_no = line_number_start + index;
-    let line_change = git_changes.get(index).copied().flatten();
-
-    // Convert highlights to the format expected by the decorations module
-    // Apply unprintable character transformation if show_all is enabled
-    let line_content: Vec<(String, Option<String>)> = line
-      .iter()
-      .map(|(text, style)| {
-        let transformed_text = if show_all {
-          unprintable::show_unprintable(text, unprintable::get_char_style())
-        } else {
-          text.to_string()
-        };
-        (transformed_text, style.map(|s| s.to_string()))
-      })
-      .collect();
-
-    let rendered = decorations::render_decorated_line(
-      &line_content,
-      line_no,
-      &effective_config,
-      line_change,
-      renderer,
-      theme,
-      width,
-    );
-
-    out.push_str(&rendered);
-
-    // Add line feed marker at the end of each line when show_all is enabled
-    // Only add it to lines that have actual content
-    if show_all {
-      let line_has_content = line.iter().any(|(text, _)| !text.is_empty());
-      if line_has_content {
-        let lf_marker = if matches!(unprintable::get_char_style(), unprintable::CharStyle::Unicode) {
-          "␊"
-        } else {
-          "$"
-        };
-        out.push_str(lf_marker);
-      }
-    }
-
-    if index != last_line {
-      out += &renderer.newline();
-    }
-  }
-
-  out + &renderer.tail()
 }
 
 fn number_plain_text(text: &str, line_number_start: usize, show_all: bool) -> String {
@@ -915,29 +1249,28 @@ fn line_number_width(line_count: usize) -> usize {
   if width == 0 { 1 } else { width }
 }
 
-fn resolve_decoration_config(cli: &Cli) -> DecorationConfig {
-  let mut config = DecorationConfig::default();
-
-  // Parse style components from --style flag
-  if let Some(style) = cli.style.as_deref() {
-    config = parse_style_components(config, style);
-  }
-
-  config
-}
-
 /// Parse style components from the --style flag.
-/// Supports: "numbers", "changes", "headers"
-fn parse_style_components(mut config: DecorationConfig, style: &str) -> DecorationConfig {
-  for raw in style.split(',') {
+/// Supports: "numbers", "changes", "headers", "rich"
+fn parse_style_components(style: Option<&str>) -> StyleConfig {
+  let mut config = StyleConfig {
+    highlight_locals: true,
+    ..StyleConfig::default()
+  };
+  for raw in style.unwrap_or_default().split(',') {
     let token = raw.trim();
     match token {
-      "numbers" => config.show_numbers = true,
-      "changes" => config.show_changes = true,
-      "headers" => config.show_headers = true,
+      "numbers" => config.decoration_config.show_numbers = true,
+      "changes" => config.decoration_config.show_changes = true,
+      "headers" => config.decoration_config.show_headers = true,
+      "rich" => config.highlight_injections = true,
       _ => {}
     }
   }
+
+  if config.highlight_injections {
+    config.highlight_locals = true;
+  }
+
   config
 }
 
