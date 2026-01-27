@@ -3,6 +3,11 @@
 ### 🚀 Features
 
 - Speed up highlighting with rich style (#7)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.4.0 [ci skip]
+- Release scat version 0.4.0
 ## [0.3.0] - 2026-01-23
 
 ### 🚀 Features
