@@ -1,6 +1,8 @@
 //! Decoration rendering for line numbers, git changes, and grid separators.
 //! Provides styled output similar to bat's decorations.
 
+use std::borrow::Cow;
+
 use syntastica::renderer::{Renderer, TerminalRenderer};
 use syntastica::style::{Color, Style};
 use syntastica::theme::ResolvedTheme;
@@ -59,7 +61,7 @@ fn get_git_change_style(line_change: LineChange) -> Style {
 /// * `theme` - The color theme
 /// * `line_number_width` - Width of line number column
 pub fn render_decorated_line(
-  content: &[(String, Option<String>)],
+  content: &[(Cow<'_, str>, Option<&'static str>)],
   line_no: usize,
   config: &DecorationConfig,
   line_change: Option<LineChange>,
@@ -113,7 +115,7 @@ pub fn render_decorated_line(
   // Content
   for (text, style_key) in content {
     let escaped = renderer.escape(text);
-    match style_key.as_ref().and_then(|key| theme.find_style(key)) {
+    match style_key.and_then(|key| theme.find_style(key)) {
       Some(style) => output.push_str(&renderer.styled(&escaped, style)),
       None => output.push_str(&renderer.unstyled(&escaped)),
     }

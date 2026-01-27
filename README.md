@@ -6,8 +6,9 @@ A modern replacement for `cat` with syntax highlighting and automatic language d
 
 - **Syntax highlighting** for 100+ languages using tree-sitter parsers
 - **Automatic language detection** based on file extension and content
-- **Line numbers** with `-n` flag or `--style=numbers`
+- **Line numbers** with `--style=numbers`
 - **Git change indicators** showing added, modified, and removed lines with `--style=changes`
+- **Rich highlighting** (language injections / embedded languages) with `--style=rich`
 - **Show unprintable characters** with `-A` / `--show-all` (tabs as →, carriage returns as ↵, etc.) - **unlike bat, syntax highlighting is preserved!**
 - **Theme support** with automatic dark/light mode detection
 - **Stdin support** for piping commands
@@ -74,10 +75,10 @@ cat main.rs | scat -
 
 ### Line numbers
 
-Show line numbers with the `-n` or `--line-numbers` flag:
+Show line numbers with the `numbers` style component:
 
 ```bash
-scat -n main.rs
+scat --style=numbers main.rs
 ```
 
 ### Decorations (line numbers, git changes)
@@ -93,7 +94,12 @@ scat --style=changes main.rs
 
 # Combine multiple decorations
 scat --style=numbers,changes main.rs
+
+# Enable richer highlighting (language injections / embedded languages)
+scat --style=rich main.rs
 ```
+
+Note: `--style=rich` can be significantly slower on very large files.
 
 Git change indicators show:
 - `+` (green) - added lines
@@ -200,7 +206,7 @@ man scat
 
 ```bash
 # View a Rust file with line numbers
-scat -n src/main.rs
+scat --style=numbers src/main.rs
 
 # View JSON with syntax highlighting
 scat package.json
@@ -218,7 +224,7 @@ scat --language python app.log
 scat --theme nord config.yaml
 
 # View multiple files with line numbers
-scat -n *.rs
+scat --style=numbers *.rs
 
 # Show unprintable characters (tabs, line feeds, etc.) with syntax highlighting
 scat -A main.rs
