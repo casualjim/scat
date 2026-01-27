@@ -1,3 +1,8 @@
+## [0.4.0] - 2026-01-27
+
+### 🚀 Features
+
+- Speed up highlighting with rich style (#7)
 ## [0.3.0] - 2026-01-23
 
 ### 🚀 Features
@@ -13,6 +18,11 @@
 ### 📚 Documentation
 
 - Update README with git decorations feature
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.3.0 [ci skip]
+- Release scat version 0.3.0
 ## [0.2.2] - 2026-01-23
 
 ### ⚙️ Miscellaneous Tasks
