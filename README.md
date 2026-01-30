@@ -1,4 +1,4 @@
-# scat
+# umber
 
 A modern replacement for `cat` with syntax highlighting and automatic language detection.
 
@@ -36,13 +36,13 @@ mise build:debug
 
 ```bash
 # Quick help
-scat -h
+umber -h
 
 # Detailed help with examples
-scat --help
+umber --help
 
 # View man page (after installation)
-man scat
+man umber
 ```
 
 ### Basic usage
@@ -50,27 +50,27 @@ man scat
 Display a file with syntax highlighting:
 
 ```bash
-scat main.rs
+umber main.rs
 ```
 
 Display multiple files:
 
 ```bash
-scat main.rs lib.rs
+umber main.rs lib.rs
 ```
 
 Show unprintable characters (tabs as →, line feeds as ␊):
 
 ```bash
-scat -A main.rs
+umber -A main.rs
 ```
 
 Read from stdin:
 
 ```bash
-echo 'fn main() { println!("Hello!"); }' | scat
+echo 'fn main() { println!("Hello!"); }' | umber
 # or explicitly:
-cat main.rs | scat -
+cat main.rs | umber -
 ```
 
 ### Line numbers
@@ -78,7 +78,7 @@ cat main.rs | scat -
 Show line numbers with the `numbers` style component:
 
 ```bash
-scat --style=numbers main.rs
+umber --style=numbers main.rs
 ```
 
 ### Decorations (line numbers, git changes)
@@ -87,16 +87,16 @@ Control which decorations to display with the `--style` flag:
 
 ```bash
 # Show line numbers with grid separator
-scat --style=numbers main.rs
+umber --style=numbers main.rs
 
 # Show git change indicators (+, ~, -)
-scat --style=changes main.rs
+umber --style=changes main.rs
 
 # Combine multiple decorations
-scat --style=numbers,changes main.rs
+umber --style=numbers,changes main.rs
 
 # Enable richer highlighting (language injections / embedded languages)
-scat --style=rich main.rs
+umber --style=rich main.rs
 ```
 
 Note: `--style=rich` can be significantly slower on very large files.
@@ -111,7 +111,7 @@ Git change indicators show:
 Display tabs, carriage returns, line feeds, and other non-printable characters with `-A` / `--show-all`:
 
 ```bash
-scat -A main.rs
+umber -A main.rs
 ```
 
 This shows:
@@ -122,14 +122,14 @@ This shows:
 - `␛` (escape symbol) for escape characters
 - `␀`, `␁`, `␂`, etc. for other control characters
 
-**Unlike `bat -A`**, scat maintains full syntax highlighting while showing unprintable characters!
+**Unlike `bat -A`**, umber maintains full syntax highlighting while showing unprintable characters!
 
 ```bash
 # Combine with line numbers
-scat -A -n main.rs
+umber -A -n main.rs
 
 # Works with git change indicators too
-scat -A --style=changes,numbers main.rs
+umber -A --style=changes,numbers main.rs
 ```
 
 ### Language override
@@ -137,8 +137,8 @@ scat -A --style=changes,numbers main.rs
 Force a specific language when auto-detection fails:
 
 ```bash
-scat --language rust config.txt
-scat --language json response.log
+umber --language rust config.txt
+umber --language json response.log
 ```
 
 To see all supported languages, check the [syntastica documentation](https://docs.rs/syntastica-parsers/latest/syntastica_parsers/).
@@ -148,11 +148,11 @@ To see all supported languages, check the [syntastica documentation](https://doc
 Specify a theme with `--theme`:
 
 ```bash
-scat --theme dracula main.rs
-scat --theme gruvbox-light main.rs
+umber --theme dracula main.rs
+umber --theme gruvbox-light main.rs
 ```
 
-By default, `scat` uses `auto` which detects your system's dark/light mode preference:
+By default, `umber` uses `auto` which detects your system's dark/light mode preference:
 - **Light mode**: Catppuccin Latte
 - **Dark mode**: Catppuccin Mocha
 
@@ -175,16 +175,16 @@ Generate shell completions for your shell:
 
 ```bash
 # Bash
-scat --completions bash > ~/.local/share/bash-completion/completions/scat
+umber --completions bash > ~/.local/share/bash-completion/completions/umber
 
 # Zsh
-scat --completions zsh > ~/.zsh/completion/_scat
+umber --completions zsh > ~/.zsh/completion/_umber
 
 # Fish
-scat --completions fish > ~/.config/fish/completions/scat.fish
+umber --completions fish > ~/.config/fish/completions/umber.fish
 
 # PowerShell
-scat --completions powershell > scat.ps1
+umber --completions powershell > umber.ps1
 ```
 
 ### Man page
@@ -193,49 +193,49 @@ Generate and install a man page:
 
 ```bash
 # Generate man page
-scat --man-page > scat.1
+umber --man-page > umber.1
 
 # Install system-wide (requires sudo)
-sudo cp scat.1 /usr/local/share/man/man1/
+sudo cp umber.1 /usr/local/share/man/man1/
 
 # View the man page
-man scat
+man umber
 ```
 
 ## Examples
 
 ```bash
 # View a Rust file with line numbers
-scat --style=numbers src/main.rs
+umber --style=numbers src/main.rs
 
 # View JSON with syntax highlighting
-scat package.json
+umber package.json
 
-# Pipe git diff through scat
-git diff | scat --language diff
+# Pipe git diff through umber
+git diff | umber --language diff
 
 # Compare files side by side with syntax highlighting
-diff <(scat file1.js) <(scat file2.js)
+diff <(umber file1.js) <(umber file2.js)
 
 # View logs with Python syntax highlighting
-scat --language python app.log
+umber --language python app.log
 
 # Use a specific theme
-scat --theme nord config.yaml
+umber --theme nord config.yaml
 
 # View multiple files with line numbers
-scat --style=numbers *.rs
+umber --style=numbers *.rs
 
 # Show unprintable characters (tabs, line feeds, etc.) with syntax highlighting
-scat -A main.rs
+umber -A main.rs
 
 # Debug a file with mixed line endings
-scat -A --style=numbers problem_file.txt
+umber -A --style=numbers problem_file.txt
 ```
 
 ## Supported Languages
 
-`scat` supports 100+ programming languages through tree-sitter parsers, including:
+`umber` supports 100+ programming languages through tree-sitter parsers, including:
 
 - C, C++, C#, Objective-C
 - Rust, Go, Zig
@@ -252,7 +252,7 @@ scat -A --style=numbers problem_file.txt
 
 For a complete list, see the [syntastica-parsers documentation](https://docs.rs/syntastica-parsers/latest/syntastica_parsers/).
 
-## Why scat?
+## Why umber?
 
 - **Modern syntax highlighting** using tree-sitter for accurate, grammar-aware highlighting
 - **Show unprintable characters with colors** - unique feature that maintains highlighting while showing tabs, line feeds, and control characters
@@ -263,7 +263,7 @@ For a complete list, see the [syntastica-parsers documentation](https://docs.rs/
 
 ## Comparison with other tools
 
-| Feature | scat | bat | ccat | highlight |
+| Feature | umber | bat | ccat | highlight |
 |---------|------|-----|------|-----------|
 | Syntax highlighting | ✅ Tree-sitter | ✅ syntect | ✅ pygments | ✅ |
 | Auto language detection | ✅ | ✅ | ✅ | ✅ |
@@ -274,9 +274,9 @@ For a complete list, see the [syntastica-parsers documentation](https://docs.rs/
 | Paging | ❌ | ✅ | ❌ | ❌ |
 | Binary files | ❌ | ✅ | ❌ | ❌ |
 
-**Key difference:** scat shows unprintable characters (tabs, line feeds, control chars) **while maintaining syntax highlighting** - unlike `bat -A` which disables colors.
+**Key difference:** umber shows unprintable characters (tabs, line feeds, control chars) **while maintaining syntax highlighting** - unlike `bat -A` which disables colors.
 
-`scat` focuses on being a simple, fast `cat` replacement with excellent syntax highlighting and git change indicators. If you need features like a built-in pager or binary file detection, check out [bat](https://github.com/sharkdp/bat).
+`umber` focuses on being a simple, fast `cat` replacement with excellent syntax highlighting and git change indicators. If you need features like a built-in pager or binary file detection, check out [bat](https://github.com/sharkdp/bat).
 
 ## Development
 

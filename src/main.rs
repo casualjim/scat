@@ -7,14 +7,14 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Cursor, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser, ValueEnum};
 use dark_light::Mode as DarkLightMode;
 use decorations::DecorationConfig;
 use eyre::{Result, eyre};
-use palate::detectors;
+use palate;
 use syntastica::language_set::{EitherLang, LanguageSet, SupportedLanguage, Union};
 use syntastica::renderer::{Renderer, TerminalRenderer};
 use syntastica::theme::{ResolvedTheme, THEME_KEYS};
@@ -23,7 +23,6 @@ use syntastica_parsers_git::{LANGUAGE_NAMES, Lang, LanguageSetImpl};
 
 use custom_langs::{CustomLang, CustomLanguageSet};
 
-const MAX_CONTENT_SIZE_BYTES: usize = 51200;
 const STREAM_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
 const STREAM_OUTPUT_FLUSH_BYTES: usize = 8 * 1024;
 
@@ -36,23 +35,23 @@ enum ColorWhen {
 
 #[derive(Parser, Debug)]
 #[command(
-  name = "scat",
+  name = "umber",
   version,
   about = "cat with syntax highlighting",
   long_about = "A modern replacement for cat with syntax highlighting powered by tree-sitter.\n\
                 Automatically detects file types and applies appropriate syntax highlighting.\n\
                 Supports 100+ programming languages and multiple color themes.",
   after_help = "EXAMPLES:\n    \
-    scat main.rs                    Display a file with syntax highlighting\n    \
-    scat --style=numbers config.toml  Show file with line numbers\n    \
-    scat main.rs#L10-L20            Show only selected lines\n    \
-    scat --language rust file.txt   Force Rust syntax highlighting\n    \
-    scat --theme dracula main.js    Use Dracula color theme\n    \
-    cat file.rs | scat              Read from stdin\n    \
-    scat *.py                       Display multiple files\n\n\
+    umber main.rs                    Display a file with syntax highlighting\n    \
+    umber --style=numbers config.toml  Show file with line numbers\n    \
+    umber main.rs#L10-L20            Show only selected lines\n    \
+    umber --language rust file.txt   Force Rust syntax highlighting\n    \
+    umber --theme dracula main.js    Use Dracula color theme\n    \
+    cat file.rs | umber              Read from stdin\n    \
+    umber *.py                       Display multiple files\n\n\
     For available themes, see: https://docs.rs/syntastica-themes/latest/syntastica_themes/\n\n\
     To generate shell completions:\n    \
-    scat --completions bash > ~/.local/share/bash-completion/completions/scat"
+    umber --completions bash > ~/.local/share/bash-completion/completions/umber"
 )]
 struct Cli {
   #[arg(
@@ -64,9 +63,9 @@ struct Cli {
                  Output the completion script to stdout, which you can then save to the\n\
                  appropriate location for your shell.\n\n\
                  Examples:\n  \
-                 scat --completions bash > ~/.local/share/bash-completion/completions/scat\n  \
-                 scat --completions zsh > ~/.zsh/completion/_scat\n  \
-                 scat --completions fish > ~/.config/fish/completions/scat.fish"
+                 umber --completions bash > ~/.local/share/bash-completion/completions/umber\n  \
+                 umber --completions zsh > ~/.zsh/completion/_umber\n  \
+                 umber --completions fish > ~/.config/fish/completions/umber.fish"
   )]
   completions: Option<clap_complete::Shell>,
 
@@ -79,8 +78,8 @@ struct Cli {
                  Useful when the file extension doesn't match the content or for files\n\
                  without extensions.\n\n\
                  Examples:\n  \
-                 scat --language rust config.txt\n  \
-                 scat --language json response.log\n\n\
+                 umber --language rust config.txt\n  \
+                 umber --language json response.log\n\n\
                  For a complete list of supported languages, see:\n\
                  https://docs.rs/syntastica-parsers-git/latest/syntastica_parsers_git/"
   )]
@@ -112,10 +111,10 @@ struct Cli {
     long_help = "Show only selected lines from the file.\n\
                  Accepted formats: start-end, start:end, start,end, or a single line number.\n\
                  Examples:\n  \
-                 scat --lines 10-20 main.rs\n  \
-                 scat --lines 10:20 main.rs\n  \
-                 scat --lines 10,20 main.rs\n  \
-                 scat --lines 10 main.rs"
+                 umber --lines 10-20 main.rs\n  \
+                 umber --lines 10:20 main.rs\n  \
+                 umber --lines 10,20 main.rs\n  \
+                 umber --lines 10 main.rs"
   )]
   lines: Option<String>,
 
@@ -170,8 +169,8 @@ struct Cli {
     long_help = "Generate a manual page in roff format and print to stdout.\n\
                  You can save this to a file and install it in your man path.\n\n\
                  Example:\n  \
-                 scat --man-page > scat.1\n  \
-                 sudo cp scat.1 /usr/local/share/man/man1/"
+                 umber --man-page > umber.1\n  \
+                 sudo cp umber.1 /usr/local/share/man/man1/"
   )]
   man_page: bool,
 
@@ -181,10 +180,10 @@ struct Cli {
     long_help = "One or more files to display with syntax highlighting.\n\
                  If no files are specified, or if '-' is given, reads from stdin.\n\n\
                  Examples:\n  \
-                 scat main.rs lib.rs\n  \
-                 scat main.rs#L10-L20\n  \
-                 cat file.rs | scat\n  \
-                 echo 'code' | scat --language rust"
+                 umber main.rs lib.rs\n  \
+                 umber main.rs#L10-L20\n  \
+                 cat file.rs | umber\n  \
+                 echo 'code' | umber --language rust"
   )]
   files: Vec<PathBuf>,
 }
@@ -353,7 +352,7 @@ fn main() -> Result<()> {
     match parse_file_spec(path, global_line_range) {
       Ok(spec) => file_specs.push(spec),
       Err(err) => {
-        eprintln!("scat: {err}");
+        eprintln!("umber: {err}");
         had_error = true;
       }
     }
@@ -410,7 +409,7 @@ fn main() -> Result<()> {
       stdin_consumed = true;
       let mut buf = Vec::new();
       if let Err(err) = stdin.read_to_end(&mut buf) {
-        eprintln!("scat: -: {err}");
+        eprintln!("umber: -: {err}");
         had_error = true;
         continue;
       }
@@ -441,7 +440,7 @@ fn main() -> Result<()> {
         wrote_output = true;
       }
       Err(err) => {
-        eprintln!("scat: {}: {err}", spec.path.display());
+        eprintln!("umber: {}: {err}", spec.path.display());
         had_error = true;
       }
     }
@@ -456,7 +455,7 @@ fn main() -> Result<()> {
 
 fn write_completions(shell: clap_complete::Shell) -> Result<()> {
   let mut cmd = Cli::command();
-  clap_complete::generate(shell, &mut cmd, "scat", &mut io::stdout());
+  clap_complete::generate(shell, &mut cmd, "umber", &mut io::stdout());
   Ok(())
 }
 
@@ -644,88 +643,21 @@ fn resolve_language_union(
 }
 
 fn detect_language_name(path: Option<&Path>, content: &str) -> Option<&'static str> {
-  let mut extension: Option<String> = None;
-  let mut candidates = Vec::new();
-
-  if let Some(path) = path
-    && let Some(filename) = path.file_name().and_then(|name| name.to_str())
-  {
-    if let Some(candidate) = detectors::get_language_from_filename(filename) {
-      return Some(candidate);
-    }
-
-    extension = detectors::get_extension(filename).map(str::to_string);
-    candidates = extension
-      .as_deref()
-      .map(detectors::get_languages_from_extension)
-      .unwrap_or_default();
-    if candidates.len() == 1 {
-      return Some(candidates[0]);
-    }
-  }
-
-  let shebang_candidates =
-    detectors::get_languages_from_shebang(Cursor::new(content)).unwrap_or_default();
-  candidates = filter_candidates(candidates, shebang_candidates);
-  if candidates.len() == 1 {
-    return Some(candidates[0]);
-  }
-
-  let content = truncate_to_char_boundary(content, MAX_CONTENT_SIZE_BYTES);
-  candidates = if candidates.len() > 1 {
-    if let Some(extension) = extension.as_deref() {
-      let heuristic_candidates =
-        detectors::get_languages_from_heuristics(extension, &candidates, content);
-      filter_candidates(candidates, heuristic_candidates)
-    } else {
-      candidates
-    }
+  // Use the new palate API which handles all detection internally
+  let file_type = if let Some(path) = path {
+    palate::try_detect(path, content)?
   } else {
-    candidates
+    // No path, try to detect from content only
+    // palate requires a path, so use a dummy path
+    palate::try_detect("", content)?
   };
 
-  match candidates.len() {
-    0 => None,
-    1 => Some(candidates[0]),
-    _ => Some(detectors::classify(content, &candidates)),
+  // Convert FileType to language name string
+  // FileType::Text means no specific language detected
+  match file_type {
+    palate::FileType::Text => None,
+    other => Some(Box::leak(other.to_string().into_boxed_str())),
   }
-}
-
-fn filter_candidates(
-  previous_candidates: Vec<&'static str>,
-  new_candidates: Vec<&'static str>,
-) -> Vec<&'static str> {
-  if previous_candidates.is_empty() {
-    return new_candidates;
-  }
-
-  if new_candidates.is_empty() {
-    return previous_candidates;
-  }
-
-  let filtered_candidates: Vec<&'static str> = previous_candidates
-    .iter()
-    .filter(|candidate| new_candidates.contains(candidate))
-    .copied()
-    .collect();
-
-  if filtered_candidates.is_empty() {
-    previous_candidates
-  } else {
-    filtered_candidates
-  }
-}
-
-fn truncate_to_char_boundary(s: &str, mut max: usize) -> &str {
-  if max >= s.len() {
-    return s;
-  }
-
-  while !s.is_char_boundary(max) {
-    max -= 1;
-  }
-
-  &s[..max]
 }
 
 #[derive(Debug)]

@@ -2,7 +2,7 @@
 
 ## Overview
 
-`scat` is a modern replacement for `cat` with syntax highlighting and automatic language detection. This document covers local development and the automated release process.
+`umber` is a modern replacement for `cat` with syntax highlighting and automatic language detection. This document covers local development and the automated release process.
 
 ## Requirements
 
