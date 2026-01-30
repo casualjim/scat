@@ -7,14 +7,14 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Cursor, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser, ValueEnum};
 use dark_light::Mode as DarkLightMode;
 use decorations::DecorationConfig;
 use eyre::{Result, eyre};
-use palate::detectors;
+use palate;
 use syntastica::language_set::{EitherLang, LanguageSet, SupportedLanguage, Union};
 use syntastica::renderer::{Renderer, TerminalRenderer};
 use syntastica::theme::{ResolvedTheme, THEME_KEYS};
@@ -23,7 +23,6 @@ use syntastica_parsers_git::{LANGUAGE_NAMES, Lang, LanguageSetImpl};
 
 use custom_langs::{CustomLang, CustomLanguageSet};
 
-const MAX_CONTENT_SIZE_BYTES: usize = 51200;
 const STREAM_OUTPUT_BUFFER_BYTES: usize = 64 * 1024;
 const STREAM_OUTPUT_FLUSH_BYTES: usize = 8 * 1024;
 
@@ -644,88 +643,21 @@ fn resolve_language_union(
 }
 
 fn detect_language_name(path: Option<&Path>, content: &str) -> Option<&'static str> {
-  let mut extension: Option<String> = None;
-  let mut candidates = Vec::new();
-
-  if let Some(path) = path
-    && let Some(filename) = path.file_name().and_then(|name| name.to_str())
-  {
-    if let Some(candidate) = detectors::get_language_from_filename(filename) {
-      return Some(candidate);
-    }
-
-    extension = detectors::get_extension(filename).map(str::to_string);
-    candidates = extension
-      .as_deref()
-      .map(detectors::get_languages_from_extension)
-      .unwrap_or_default();
-    if candidates.len() == 1 {
-      return Some(candidates[0]);
-    }
-  }
-
-  let shebang_candidates =
-    detectors::get_languages_from_shebang(Cursor::new(content)).unwrap_or_default();
-  candidates = filter_candidates(candidates, shebang_candidates);
-  if candidates.len() == 1 {
-    return Some(candidates[0]);
-  }
-
-  let content = truncate_to_char_boundary(content, MAX_CONTENT_SIZE_BYTES);
-  candidates = if candidates.len() > 1 {
-    if let Some(extension) = extension.as_deref() {
-      let heuristic_candidates =
-        detectors::get_languages_from_heuristics(extension, &candidates, content);
-      filter_candidates(candidates, heuristic_candidates)
-    } else {
-      candidates
-    }
+  // Use the new palate API which handles all detection internally
+  let file_type = if let Some(path) = path {
+    palate::try_detect(path, content)?
   } else {
-    candidates
+    // No path, try to detect from content only
+    // palate requires a path, so use a dummy path
+    palate::try_detect("", content)?
   };
 
-  match candidates.len() {
-    0 => None,
-    1 => Some(candidates[0]),
-    _ => Some(detectors::classify(content, &candidates)),
+  // Convert FileType to language name string
+  // FileType::Text means no specific language detected
+  match file_type {
+    palate::FileType::Text => None,
+    other => Some(Box::leak(other.to_string().into_boxed_str())),
   }
-}
-
-fn filter_candidates(
-  previous_candidates: Vec<&'static str>,
-  new_candidates: Vec<&'static str>,
-) -> Vec<&'static str> {
-  if previous_candidates.is_empty() {
-    return new_candidates;
-  }
-
-  if new_candidates.is_empty() {
-    return previous_candidates;
-  }
-
-  let filtered_candidates: Vec<&'static str> = previous_candidates
-    .iter()
-    .filter(|candidate| new_candidates.contains(candidate))
-    .copied()
-    .collect();
-
-  if filtered_candidates.is_empty() {
-    previous_candidates
-  } else {
-    filtered_candidates
-  }
-}
-
-fn truncate_to_char_boundary(s: &str, mut max: usize) -> &str {
-  if max >= s.len() {
-    return s;
-  }
-
-  while !s.is_char_boundary(max) {
-    max -= 1;
-  }
-
-  &s[..max]
 }
 
 #[derive(Debug)]
