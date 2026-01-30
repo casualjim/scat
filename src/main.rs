@@ -36,23 +36,23 @@ enum ColorWhen {
 
 #[derive(Parser, Debug)]
 #[command(
-  name = "scat",
+  name = "umber",
   version,
   about = "cat with syntax highlighting",
   long_about = "A modern replacement for cat with syntax highlighting powered by tree-sitter.\n\
                 Automatically detects file types and applies appropriate syntax highlighting.\n\
                 Supports 100+ programming languages and multiple color themes.",
   after_help = "EXAMPLES:\n    \
-    scat main.rs                    Display a file with syntax highlighting\n    \
-    scat --style=numbers config.toml  Show file with line numbers\n    \
-    scat main.rs#L10-L20            Show only selected lines\n    \
-    scat --language rust file.txt   Force Rust syntax highlighting\n    \
-    scat --theme dracula main.js    Use Dracula color theme\n    \
-    cat file.rs | scat              Read from stdin\n    \
-    scat *.py                       Display multiple files\n\n\
+    umber main.rs                    Display a file with syntax highlighting\n    \
+    umber --style=numbers config.toml  Show file with line numbers\n    \
+    umber main.rs#L10-L20            Show only selected lines\n    \
+    umber --language rust file.txt   Force Rust syntax highlighting\n    \
+    umber --theme dracula main.js    Use Dracula color theme\n    \
+    cat file.rs | umber              Read from stdin\n    \
+    umber *.py                       Display multiple files\n\n\
     For available themes, see: https://docs.rs/syntastica-themes/latest/syntastica_themes/\n\n\
     To generate shell completions:\n    \
-    scat --completions bash > ~/.local/share/bash-completion/completions/scat"
+    umber --completions bash > ~/.local/share/bash-completion/completions/umber"
 )]
 struct Cli {
   #[arg(
@@ -64,9 +64,9 @@ struct Cli {
                  Output the completion script to stdout, which you can then save to the\n\
                  appropriate location for your shell.\n\n\
                  Examples:\n  \
-                 scat --completions bash > ~/.local/share/bash-completion/completions/scat\n  \
-                 scat --completions zsh > ~/.zsh/completion/_scat\n  \
-                 scat --completions fish > ~/.config/fish/completions/scat.fish"
+                 umber --completions bash > ~/.local/share/bash-completion/completions/umber\n  \
+                 umber --completions zsh > ~/.zsh/completion/_umber\n  \
+                 umber --completions fish > ~/.config/fish/completions/umber.fish"
   )]
   completions: Option<clap_complete::Shell>,
 
@@ -79,8 +79,8 @@ struct Cli {
                  Useful when the file extension doesn't match the content or for files\n\
                  without extensions.\n\n\
                  Examples:\n  \
-                 scat --language rust config.txt\n  \
-                 scat --language json response.log\n\n\
+                 umber --language rust config.txt\n  \
+                 umber --language json response.log\n\n\
                  For a complete list of supported languages, see:\n\
                  https://docs.rs/syntastica-parsers-git/latest/syntastica_parsers_git/"
   )]
@@ -112,10 +112,10 @@ struct Cli {
     long_help = "Show only selected lines from the file.\n\
                  Accepted formats: start-end, start:end, start,end, or a single line number.\n\
                  Examples:\n  \
-                 scat --lines 10-20 main.rs\n  \
-                 scat --lines 10:20 main.rs\n  \
-                 scat --lines 10,20 main.rs\n  \
-                 scat --lines 10 main.rs"
+                 umber --lines 10-20 main.rs\n  \
+                 umber --lines 10:20 main.rs\n  \
+                 umber --lines 10,20 main.rs\n  \
+                 umber --lines 10 main.rs"
   )]
   lines: Option<String>,
 
@@ -170,8 +170,8 @@ struct Cli {
     long_help = "Generate a manual page in roff format and print to stdout.\n\
                  You can save this to a file and install it in your man path.\n\n\
                  Example:\n  \
-                 scat --man-page > scat.1\n  \
-                 sudo cp scat.1 /usr/local/share/man/man1/"
+                 umber --man-page > umber.1\n  \
+                 sudo cp umber.1 /usr/local/share/man/man1/"
   )]
   man_page: bool,
 
@@ -181,10 +181,10 @@ struct Cli {
     long_help = "One or more files to display with syntax highlighting.\n\
                  If no files are specified, or if '-' is given, reads from stdin.\n\n\
                  Examples:\n  \
-                 scat main.rs lib.rs\n  \
-                 scat main.rs#L10-L20\n  \
-                 cat file.rs | scat\n  \
-                 echo 'code' | scat --language rust"
+                 umber main.rs lib.rs\n  \
+                 umber main.rs#L10-L20\n  \
+                 cat file.rs | umber\n  \
+                 echo 'code' | umber --language rust"
   )]
   files: Vec<PathBuf>,
 }
@@ -353,7 +353,7 @@ fn main() -> Result<()> {
     match parse_file_spec(path, global_line_range) {
       Ok(spec) => file_specs.push(spec),
       Err(err) => {
-        eprintln!("scat: {err}");
+        eprintln!("umber: {err}");
         had_error = true;
       }
     }
@@ -410,7 +410,7 @@ fn main() -> Result<()> {
       stdin_consumed = true;
       let mut buf = Vec::new();
       if let Err(err) = stdin.read_to_end(&mut buf) {
-        eprintln!("scat: -: {err}");
+        eprintln!("umber: -: {err}");
         had_error = true;
         continue;
       }
@@ -441,7 +441,7 @@ fn main() -> Result<()> {
         wrote_output = true;
       }
       Err(err) => {
-        eprintln!("scat: {}: {err}", spec.path.display());
+        eprintln!("umber: {}: {err}", spec.path.display());
         had_error = true;
       }
     }
@@ -456,7 +456,7 @@ fn main() -> Result<()> {
 
 fn write_completions(shell: clap_complete::Shell) -> Result<()> {
   let mut cmd = Cli::command();
-  clap_complete::generate(shell, &mut cmd, "scat", &mut io::stdout());
+  clap_complete::generate(shell, &mut cmd, "umber", &mut io::stdout());
   Ok(())
 }
 

@@ -44,18 +44,18 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            test -f target/${{ matrix.target }}/release/scat.exe
-            ls -lh target/${{ matrix.target }}/release/scat.exe
+            test -f target/${{ matrix.target }}/release/umber.exe
+            ls -lh target/${{ matrix.target }}/release/umber.exe
           else
-            test -f target/${{ matrix.target }}/release/scat
-            ls -lh target/${{ matrix.target }}/release/scat
+            test -f target/${{ matrix.target }}/release/umber
+            ls -lh target/${{ matrix.target }}/release/umber
           fi
 
       - name: Run basic test
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            echo "fn main() {}" | target/${{ matrix.target }}/release/scat.exe --language rust
+            echo "fn main() {}" | target/${{ matrix.target }}/release/umber.exe --language rust
           else
-            echo "fn main() {}" | target/${{ matrix.target }}/release/scat --language rust
+            echo "fn main() {}" | target/${{ matrix.target }}/release/umber --language rust
           fi
